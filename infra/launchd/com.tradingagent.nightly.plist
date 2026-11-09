@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.tradingagent.nightly</string>
+
+  <!-- `uv run --frozen` is used rather than a bare python because launchd
+       execs without a shell: there is no PATH, no venv activation and no
+       profile. The absolute uv path is deliberate. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>--frozen</string>
+    <string>--directory</string>
+    <string>/Users/msuhi00/Projects/trading-agent</string>
+    <string>ta</string>
+    <string>daily</string>
+    <string>--days</string>
+    <string>7</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>/Users/msuhi00/Projects/trading-agent</string>
+
+  <!-- 18:45 IST. The NSE bhavcopy lands ~18:30; 15 minutes of slack covers a
+       late publish without pushing the run into the evening.
+       If the Mac is ASLEEP at 18:45, launchd runs this on the next wake —
+       that is what StartCalendarInterval does with a missed window, and it
+       is why the job is idempotent: a repeat run re-reads cached bhavcopies
+       and ReplacingMergeTree collapses duplicate rows. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>18</integer>
+    <key>Minute</key><integer>45</integer>
+  </dict>
+
+  <key>RunAtLoad</key><false/>
+
+  <!-- The run touches the network and ClickHouse; 30 min is generous for a
+       7-day incremental and bounds a hung fetch. -->
+  <key>ExitTimeOut</key><integer>1800</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+
+  <key>StandardOutPath</key><string>/Users/msuhi00/Projects/trading-agent/data/logs/nightly.log</string>
+  <key>StandardErrorPath</key><string>/Users/msuhi00/Projects/trading-agent/data/logs/nightly.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/msuhi00</string>
+    <!-- The project's binding no-egress constraint. Prefect and friends
+         phone home by default; these two switches are the project-wide off. -->
+    <key>PREFECT_SERVER_ANALYTICS_ENABLED</key><string>false</string>
+    <key>DO_NOT_TRACK</key><string>1</string>
+  </dict>
+</dict>
+</plist>

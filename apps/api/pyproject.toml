@@ -1,0 +1,20 @@
+[project]
+name = "ta-api"
+version = "0.1.0"
+description = "FastAPI read model for the dashboard. Serves the built SPA as StaticFiles."
+requires-python = ">=3.13,<3.15"
+dependencies = [
+    "ta-core",
+    "ta-datafeed",
+    "ta-quant",
+    "ta-ledger",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ta_api"]

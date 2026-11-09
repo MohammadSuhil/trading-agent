@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<!-- Single-user local ClickHouse for Trading Agent.
+     THE critical setting is max_server_memory_usage: ClickHouse defaults it to
+     0 == "use all available", which on this 48 GB box is ~43 GB. The
+     ratio-based memory worker that would normally shrink it is documented to
+     do NOTHING on non-Linux, so on macOS the cap is fixed at startup and will
+     never voluntarily yield memory when the LLM loads. It must be ABSOLUTE. -->
+<clickhouse>
+    <logger>
+        <level>warning</level>
+        <log>data/logs/clickhouse-server.log</log>
+        <errorlog>data/logs/clickhouse-server.err.log</errorlog>
+        <size>100M</size>
+        <count>3</count>
+    </logger>
+
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    <listen_host>127.0.0.1</listen_host>
+
+    <path>data/clickhouse/data/</path>
+    <tmp_path>data/clickhouse/tmp/</tmp_path>
+    <user_files_path>data/clickhouse/user_files/</user_files_path>
+    <format_schema_path>data/clickhouse/format_schemas/</format_schema_path>
+
+    <!-- 5 GiB ABSOLUTE. Leaves room for a 22 GB model + 15 GB of apps.
+         DO NOT also set max_server_memory_usage_to_ram_ratio to 0: the ratio is
+         applied as ram*ratio and a 0 ratio computes to 0, which ClickHouse
+         treats as UNLIMITED, silently cancelling this cap. Leave the ratio at
+         its 0.9 default; the effective limit is min(5 GiB, 0.9*48 GB) = 5 GiB. -->
+    <max_server_memory_usage>5368709120</max_server_memory_usage>
+
+    <!-- A laptop does not need 16 background merge threads fighting the LLM. -->
+    <background_pool_size>8</background_pool_size>
+    <background_schedule_pool_size>4</background_schedule_pool_size>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+    <mark_cache_size>536870912</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+    <max_concurrent_queries>8</max_concurrent_queries>
+    <max_thread_pool_size>2000</max_thread_pool_size>
+
+    <merge_tree>
+        <number_of_free_entries_in_pool_to_execute_mutation>4</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>4</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>4</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+    </merge_tree>
+
+    <mlock_executable>false</mlock_executable>
+    <disable_internal_dns_cache>1</disable_internal_dns_cache>
+    <listen_try>1</listen_try>
+    <default_profile>default</default_profile>
+    <default_database>default</default_database>
+    <timezone>Asia/Kolkata</timezone>
+
+    <user_directories>
+        <users_xml><path>infra/clickhouse/users.xml</path></users_xml>
+    </user_directories>
+</clickhouse>

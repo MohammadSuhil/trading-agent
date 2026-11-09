@@ -1,0 +1,32 @@
+# --- Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# --- Node / UI
+node_modules/
+apps/ui/dist/
+*.tsbuildinfo
+
+# --- Runtime data. Regenerable, large, and machine-specific.
+# data/raw/ holds immutable downloaded bytes: cheap to refetch, pointless in
+# git, and NSE's terms prohibit redistribution of their archive files.
+data/
+!data/.gitkeep
+legacy/
+
+# --- Vendored binaries (ClickHouse server is ~500 MB)
+infra/bin/
+
+# --- Local secrets and machine-specific overrides
+.env
+.env.*
+config/local.*
+
+# --- OS / editor
+.DS_Store
+.idea/
+*.swp

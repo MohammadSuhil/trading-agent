@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Trading Agent</title>
+    <script>
+      // Stamp the theme before first paint. Without this the document renders
+      // one frame in the default theme and then flips, which reads as a flash
+      // of the wrong colours. Light is the primary surface here; dark is the
+      // selected variant behind the toggle.
+      (function () {
+        try {
+          var saved = localStorage.getItem('ta-theme');
+          var mode = saved === 'light' || saved === 'dark' ? saved : 'light';
+          document.documentElement.classList.toggle('dark', mode === 'dark');
+          document.documentElement.style.colorScheme = mode;
+        } catch (e) {
+          /* private mode / storage disabled: keep the light default */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

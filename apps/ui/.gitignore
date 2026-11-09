@@ -1,0 +1,9 @@
+node_modules/
+
+# Build output. FastAPI serves this, but it is reproducible from source with
+# `npm run build` — committing it would put a 400 kB bundle and its source map
+# into every diff that touches the UI.
+dist/
+
+*.local
+.vite/

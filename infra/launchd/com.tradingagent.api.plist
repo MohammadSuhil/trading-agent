@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.tradingagent.api</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>--frozen</string>
+    <string>--directory</string>
+    <string>/Users/msuhi00/Projects/trading-agent</string>
+    <string>python</string>
+    <string>-m</string>
+    <string>ta_api.serve</string>
+    <!-- serve.py binds 127.0.0.1 AND ::1. Browsers resolve `localhost` to
+         ::1 first; an IPv4-only bind refused them while curl fell back to
+         IPv4 and reported healthy. Still loopback-only on both families. -->
+  </array>
+
+  <key>WorkingDirectory</key><string>/Users/msuhi00/Projects/trading-agent</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <!-- Restart on crash, but NOT in a tight loop if it cannot bind. -->
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+
+  <key>StandardOutPath</key><string>/Users/msuhi00/Projects/trading-agent/data/logs/api.log</string>
+  <key>StandardErrorPath</key><string>/Users/msuhi00/Projects/trading-agent/data/logs/api.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/msuhi00</string>
+    <key>DO_NOT_TRACK</key><string>1</string>
+  </dict>
+</dict>
+</plist>

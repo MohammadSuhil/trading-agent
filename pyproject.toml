@@ -1,0 +1,59 @@
+[project]
+name = "trading-agent"
+version = "0.1.0"
+description = "Local multi-agent NSE/BSE recommendation and paper-trading system"
+requires-python = ">=3.13,<3.15"
+dependencies = [
+    "ta-core",
+    "ta-datafeed",
+    "ta-quant",
+    "ta-ledger",
+    "ta-api",
+    "ta-cli",
+]
+
+[tool.uv.workspace]
+members = [
+    "packages/core",
+    "packages/datafeed",
+    "packages/quant",
+    "packages/ledger",
+    "apps/api",
+    "packages/cli",
+]
+
+[tool.uv.sources]
+ta-core = { workspace = true }
+ta-datafeed = { workspace = true }
+ta-quant = { workspace = true }
+ta-ledger = { workspace = true }
+ta-api = { workspace = true }
+ta-cli = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pytest-asyncio>=0.25",
+    "ruff>=0.8",
+    "httpx>=0.28",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "packages", "apps"]
+addopts = "--doctest-modules -q"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = [
+    "packages/core/src",
+    "packages/datafeed/src",
+    "packages/quant/src",
+    "packages/ledger/src",
+    "apps/api/src",
+    "packages/cli/src",
+]
+# The UI build output is not Python and must never be imported by collection.
+norecursedirs = ["apps/ui", ".venv", "data", "infra", "legacy", "node_modules"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"

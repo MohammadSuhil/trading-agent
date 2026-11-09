@@ -1,0 +1,253 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens.
+ *
+ * ── The system, in one paragraph ────────────────────────────────────────────
+ * A deep navy rail (#0B2545) against a soft blue-grey canvas (#EEF2F7) with
+ * white cards. Depth comes from the canvas/card contrast, not from shadows —
+ * that is why the shadows here are almost nothing. Neutrals are one cool slate
+ * ladder generated in OKLCH at hue 250 with chroma tapering 0.004 → 0.064, so
+ * every border, every label and the rail itself are relatives rather than eight
+ * unrelated greys. LIGHT is the primary surface; dark is a selected variant,
+ * re-stepped against its own surfaces, not an inversion.
+ *
+ * Measured, not eyeballed (WCAG 2 contrast, computed from these exact hexes):
+ *   light  ink 17.22:1 · ink-2 6.81:1 · muted 4.62:1   (on #ffffff)
+ *   dark   ink 14.93:1 · ink-2 9.55:1 · muted 5.58:1   (on #111d2b)
+ *   rail   white 15.39:1 · rail-ink 9.82:1 · rail-muted 6.23:1 (on #0B2545)
+ * Every one clears WCAG AA for body text at the sizes used.
+ *
+ * The categorical trio was re-run against the NEW surfaces:
+ *   node scripts/validate_palette.js "#2a78d6,#eb6834,#1baf7a" \
+ *        --mode light --surface "#ffffff"         → all checks pass
+ *   node scripts/validate_palette.js "#3987e5,#d95926,#199e70" \
+ *        --mode dark  --surface "#111d2b"         → all checks pass
+ * (both also under --pairs all). The one WARN is light-mode aqua at 2.82:1 as a
+ * FILL; the relief rule applies and is satisfied — aqua only ever appears
+ * behind a chip that also carries its word and glyph, and the aqua TEXT step is
+ * a different, darker token. Do not hand-edit a series value without re-running
+ * the validator: the slot ORDER is the colour-blind-safety mechanism.
+ *
+ * Values are "R G B" triples rather than hex, because that is the only form
+ * Tailwind can inject an alpha into: a token written `var(--x)` makes `bg-x/10`
+ * render at full opacity, which turns every tinted chip into a saturated block.
+ * tailwind.config.js wraps these as `rgb(var(--token) / <alpha-value>)`;
+ * src/lib/theme.ts wraps them as `rgb(r g b)` for the canvas and SVG charts,
+ * which cannot read a Tailwind class. One source of truth, two consumers.
+ *
+ * The diverging pair is blue <-> red, NOT the green/red of conventional trading
+ * screens. Green-vs-red is the single worst pair for the ~8% of men with
+ * red-green colour blindness, and a screen whose entire purpose is showing
+ * which way a number went is the worst place to hide it. Every up/down colour
+ * is additionally paired with a glyph and the signed value.
+ *
+ * Note the `*-ink` tokens. A fill and a label are different jobs with different
+ * thresholds (3:1 for a mark, 4.5:1 for small text). Where the documented mark
+ * step is too light to set type in, there is a same-hue step beside it,
+ * re-stepped until it cleared 4.5:1, listed with its measured ratio.
+ */
+@layer base {
+  :root {
+    color-scheme: light;
+
+    /* ── cool slate ramp, light ─────────────────────────────────────────── */
+    --page: 238 242 247; /* #eef2f7  the canvas */
+    --surface-1: 255 255 255; /* #ffffff  the card (palette validated here) */
+    --surface-2: 240 246 252; /* #f0f6fc  sunken: wells, table stripes */
+    --surface-3: 248 251 255; /* #f7fbff  raised: hover, popovers */
+
+    --ink: 0 28 54; /* #001c36  17.22:1 */
+    --ink-2: 70 93 117; /* #465d75   6.81:1 */
+    --ink-muted: 99 119 140; /* #63778c  4.62:1 — AA at 11px, deliberately not pale */
+
+    --grid: 229 238 247; /* #e5eef7 */
+    --axis: 200 213 227; /* #c8d5e3 */
+    --line: 216 227 238; /* #d8e3ee  the hairline */
+    --line-strong: 200 213 227; /* #c8d5e3 */
+
+    /* ── the navigation rail. Fixed across both themes except its depth. ── */
+    --rail: 11 37 69; /* #0b2545 */
+    --rail-2: 6 32 64; /* #062040  the rail's own footer well */
+    --rail-active: 23 57 106; /* #17396a  white on it 11.48:1 */
+    --rail-ink: 195 208 222; /* #c3d0de  9.82:1 on the rail */
+    --rail-muted: 147 167 189; /* #93a7bd  6.23:1 on the rail */
+
+    /* ── the one accent: a confident blue, used for chrome only ─────────── */
+    --accent: 28 92 171; /* #1c5cab  6.63:1 — fills, rules, focus */
+    --accent-ink: 38 116 210; /* #2674d2  4.66:1 — accent as TEXT */
+    --accent-soft: 232 241 253; /* #e8f1fd  tinted accent surface */
+
+    /* Status scale — fixed, never themed, always shipped with icon + label. */
+    --status-good: 12 163 12; /* #0ca30c */
+    --status-warning: 250 178 25; /* #fab219 */
+    --status-serious: 236 131 90; /* #ec835a */
+    --status-critical: 208 59 59; /* #d03b3b */
+    --good-ink: 0 136 0; /* #008800  4.64:1 */
+    --warning-ink: 168 100 0; /* #a86400  4.68:1 */
+    --critical-ink: 208 59 59; /* #d03b3b  4.80:1 */
+
+    /* Diverging poles + neutral midpoint (polarity: gain / loss). */
+    --pole-pos: 42 120 214; /* #2a78d6 */
+    --pole-neg: 227 73 72; /* #e34948 */
+    --pole-mid: 229 238 247; /* #e5eef7 */
+    --pos-ink: 38 116 210; /* #2674d2  4.66:1 */
+    --neg-ink: 213 59 60; /* #d53b3c  4.65:1 */
+
+    /* Categorical slots, in fixed order. Only the first three are used; the
+       all-pairs series cap is three, and nothing here needs a fourth. */
+    --series-1: 42 120 214; /* #2a78d6 blue */
+    --series-2: 235 104 52; /* #eb6834 orange */
+    --series-3: 27 175 122; /* #1baf7a aqua */
+    --s2-ink: 203 74 11; /* #cb4a0b  4.64:1 */
+    --s3-ink: 0 134 84; /* #008654  4.63:1 */
+
+    /* Action fills. Solid = "transact today"; only BUY and SELL get one.
+       White label text measured on each: #1c5cab 6.63:1 · #c0392f 5.43:1. */
+    --buy-fill: 28 92 171; /* #1c5cab */
+    --sell-fill: 192 57 47; /* #c0392f */
+
+    --focus: 28 92 171;
+
+    /* Depth is the canvas/card step; the shadow only softens the edge. */
+    --shadow-card: 0 1px 2px rgb(0 28 54 / 0.04);
+    --shadow-raise: 0 2px 8px -2px rgb(0 28 54 / 0.10), 0 1px 2px rgb(0 28 54 / 0.05);
+    --shadow-pop: 0 14px 34px -10px rgb(0 28 54 / 0.26), 0 2px 8px rgb(0 28 54 / 0.08);
+  }
+
+  .dark {
+    color-scheme: dark;
+
+    /* ── same ladder, sampled for the dark band. Selected, not flipped. ─── */
+    --page: 10 20 32; /* #0a1420 */
+    --surface-1: 17 29 43; /* #111d2b  the card (palette validated here) */
+    --surface-2: 13 24 36; /* #0d1824 */
+    --surface-3: 26 40 56; /* #1a2838 */
+
+    --ink: 234 241 248; /* #eaf1f8  14.93:1 */
+    --ink-2: 180 196 212; /* #b4c4d4   9.55:1 */
+    --ink-muted: 131 150 168; /* #8396a8  5.58:1 */
+
+    --grid: 26 40 56; /* #1a2838 */
+    --axis: 50 70 93; /* #32465d */
+    --line: 34 50 70; /* #223246 */
+    --line-strong: 50 70 93; /* #32465d */
+
+    --rail: 7 15 26; /* #070f1a */
+    --rail-2: 10 20 32; /* #0a1420 */
+    --rail-active: 23 57 106; /* #17396a */
+    --rail-ink: 195 208 222; /* #c3d0de */
+    --rail-muted: 147 167 189; /* #93a7bd */
+
+    --accent: 47 127 224; /* #2f7fe0  4.24:1 on the dark card, white on it 4.01:1 */
+    --accent-ink: 91 160 240; /* #5ba0f0  6.26:1 */
+    --accent-soft: 20 41 66; /* #142942 */
+
+    --status-good: 12 163 12;
+    --status-warning: 250 178 25;
+    --status-serious: 236 131 90;
+    --status-critical: 208 59 59;
+    --good-ink: 54 196 54; /* #36c436  7.38:1 */
+    --warning-ink: 250 178 25; /* #fab219  9.27:1 */
+    --critical-ink: 240 114 114; /* #f07272  5.96:1 */
+
+    /* Dark is SELECTED: the same hues re-stepped for the dark surface and
+       re-validated as a set. */
+    --pole-pos: 57 135 229; /* #3987e5 */
+    --pole-neg: 230 103 103; /* #e66767 */
+    --pole-mid: 34 50 70; /* #223246 */
+    --pos-ink: 91 160 240; /* #5ba0f0  6.26:1 */
+    --neg-ink: 240 114 114; /* #f07272  5.96:1 */
+
+    --series-1: 57 135 229; /* #3987e5 */
+    --series-2: 217 89 38; /* #d95926 */
+    --series-3: 25 158 112; /* #199e70 */
+    --s2-ink: 245 138 92; /* #f58a5c  7.03:1 */
+    --s3-ink: 47 196 141; /* #2fc48d  7.62:1 */
+
+    --buy-fill: 31 111 208; /* #1f6fd0  white 4.95:1, card 3.44:1 */
+    --sell-fill: 207 59 59; /* #cf3b3b  white 4.84:1, card 3.52:1 */
+
+    --focus: 91 160 240;
+
+    --shadow-card: 0 1px 0 rgb(234 241 248 / 0.03);
+    --shadow-raise: 0 2px 10px -2px rgb(0 0 0 / 0.5);
+    --shadow-pop: 0 16px 38px -10px rgb(0 0 0 / 0.72), 0 2px 8px rgb(0 0 0 / 0.5);
+  }
+
+  /*
+   * Wayfinding hues.
+   *
+   * The owner asked that a tab be identifiable without reading it. These eight
+   * are the icon tile behind each nav glyph — identity, not measurement, so
+   * they are kept off the data palette's slots and never appear on a chart.
+   * Each was checked against the rail it sits on (>= 5.2:1 on #0b2545, lowest
+   * of the eight) and each is still accompanied by its glyph, its label and its
+   * position in a fixed list, so hue is the third channel here, not the first.
+   */
+  :root,
+  .dark {
+    --nav-today: 77 154 240; /* #4d9af0  5.27 */
+    --nav-heatmap: 240 135 90; /* #f0875a  6.09 */
+    --nav-screener: 43 194 138; /* #2bc28a  6.73 */
+    --nav-portfolio: 168 155 247; /* #a89bf7  6.37 */
+    --nav-risk: 245 187 61; /* #f5bb3d  8.84 */
+    --nav-analysis: 85 200 221; /* #55c8dd  7.83 */
+    --nav-calibration: 242 147 184; /* #f293b8  7.06 */
+    --nav-glossary: 195 208 222; /* #c3d0de  9.82 */
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-page font-sans text-ink antialiased;
+  }
+
+  /* One visible focus treatment everywhere — the nav, the tables, the treemap
+     cells, every glossary term and the rejections drawer all have to be
+     reachable without a mouse. */
+  :focus-visible {
+    outline: 2px solid rgb(var(--focus));
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* On the navy rail the page focus colour would disappear. */
+  .rail :focus-visible {
+    outline-color: #ffffff;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-[10px] border border-line bg-surface;
+    box-shadow: var(--shadow-card);
+  }
+
+  .label {
+    @apply text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted;
+  }
+
+  /* Columns of numbers align; standalone display numbers do not use this. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* A term that carries a glossary definition. The dotted underline is the
+     centuries-old "there is a definition here" mark, and it survives
+     greyscale, forced-colors and a colour-blind reader. */
+  .termable {
+    @apply cursor-help rounded-[3px] underline decoration-dotted decoration-from-font underline-offset-[3px];
+    text-decoration-color: rgb(var(--ink-muted) / 0.8);
+  }
+  .termable:hover,
+  .termable:focus-visible {
+    text-decoration-color: rgb(var(--accent-ink));
+  }
+}
