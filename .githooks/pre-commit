@@ -1,0 +1,8 @@
+#!/bin/sh
+# Regenerate docs/CODEMAP.md so the committed map always matches the code.
+# Enabled per clone with: git config core.hooksPath .githooks
+# tests/test_codemap.py is the backstop for clones that skip this hook.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+uv run --frozen python scripts/gen_codemap.py
+git add docs/CODEMAP.md

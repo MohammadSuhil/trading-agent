@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./uv.lock)",
+      "Read(./apps/ui/package-lock.json)",
+      "Read(./apps/ui/node_modules/**)",
+      "Read(./apps/ui/dist/**)",
+      "Read(./data/**)",
+      "Read(./infra/clickhouse/data/**)",
+      "Read(./infra/bin/**)",
+      "Read(./legacy/**)",
+      "Read(**/__pycache__/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit*)",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run --frozen python scripts/gen_codemap.py && git add docs/CODEMAP.md",
+            "timeout": 60,
+            "statusMessage": "Regenerating docs/CODEMAP.md"
+          }
+        ]
+      }
+    ]
+  }
+}
