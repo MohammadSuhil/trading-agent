@@ -100,6 +100,13 @@ CREATE TABLE IF NOT EXISTS ev.recommendations (
     expectancy_atr  Float32,
     composite       Float32,
     reasons         Array(String),
+    trend_20        LowCardinality(String) DEFAULT 'UNDEFINED',
+    trend_63        LowCardinality(String) DEFAULT 'UNDEFINED',
+    trend_252       LowCardinality(String) DEFAULT 'UNDEFINED',
+    ind_trend_20    LowCardinality(String) DEFAULT 'UNDEFINED',
+    ind_trend_63    LowCardinality(String) DEFAULT 'UNDEFINED',
+    ind_trend_252   LowCardinality(String) DEFAULT 'UNDEFINED',
+    barrier_wide    UInt8 DEFAULT 0,
     -- barrier triad, stored as RECORDED INPUTS so a replay cannot recompute
     barrier_state   LowCardinality(String),
     p_up            Nullable(Float32),

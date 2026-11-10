@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import { useApi } from '../api/client';
+import { postJson, useApi } from '../api/client';
 import type {
   Context,
   Portfolio,
@@ -25,7 +25,7 @@ import { RegimeChip, RuleStateChip, TriSourceChip } from '../components/StateChi
 import { Kpi, PillTabs, SectionHead, type Tab } from '../components/ui';
 import { TrendPairInline } from '../components/trend';
 import { Chip, Delta, Empty, Meter, Panel, SegmentedBar, cn } from '../components/primitives';
-import { TermLabel } from '../components/Tooltip';
+import { Term, TermLabel, TermText } from '../components/Tooltip';
 import { count, humanEnum, inr, isNum, isStr, pctFrac, price, signedPctFrac, stamp, text } from '../lib/format';
 
 /* ------------------------------------------------------------- KPI row */
@@ -182,14 +182,28 @@ function ListRow({
   r,
   open,
   onToggle,
+  isOwned = false,
+  onPaperBuy,
+  buying = false,
 }: {
   r: RecommendationRow;
   open: boolean;
   onToggle: (next: boolean) => void;
+  isOwned?: boolean;
+  onPaperBuy?: (r: RecommendationRow) => void;
+  buying?: boolean;
 }) {
+  const canBuy = ((isNum(r.qty) && r.qty > 0) || (isNum(r.would_qty) && r.would_qty > 0)) && !isOwned;
+
   return (
     <li className={cn('relative border-b border-line last:border-0', open && 'bg-sunken/60')}>
-      <div aria-hidden="true" className={cn('absolute inset-y-0 left-0 w-[3px]', actionRail(r.action))} />
+      <div
+        aria-hidden="true"
+        className={cn(
+          'absolute inset-y-0 left-0 w-[3px]',
+          isOwned && actionSpec(r.action)?.code === 'BUY' ? 'bg-good' : actionRail(r.action),
+        )}
+      />
       {/* A grid, not a wrapping flex row: the four columns have to line up down
           the whole list, otherwise 25 rows read as 25 different layouts. */}
       <div className="grid grid-cols-1 items-center gap-x-5 gap-y-2 py-3 pl-5 pr-4 transition-colors hover:bg-sunken/70 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1.25fr)_minmax(0,1fr)_auto]">
@@ -249,20 +263,38 @@ function ListRow({
           <SizeBlock r={r} />
         </div>
 
-        <button
-          type="button"
-          onClick={() => onToggle(!open)}
-          aria-expanded={open}
-          className="justify-self-start rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11.5px] font-medium text-ink2 hover:border-line-strong hover:text-ink lg:justify-self-end"
-        >
-          <span
-            aria-hidden="true"
-            className={cn('mr-1 inline-block text-[9px] transition-transform', open && 'rotate-90')}
+        <div className="flex items-center gap-2 justify-self-start lg:justify-self-end">
+          {isOwned ? (
+            <Chip tone="good" glyph="✓">In portfolio</Chip>
+          ) : canBuy ? (
+            <button
+              type="button"
+              disabled={buying}
+              onClick={(e) => {
+                e.stopPropagation();
+                onPaperBuy?.(r);
+              }}
+              className="rounded-lg border border-accent bg-accent/10 px-2.5 py-1 text-[11.5px] font-semibold text-accent-ink hover:bg-accent/20 disabled:opacity-50"
+            >
+              {buying ? 'Buying…' : 'Paper buy'}
+            </button>
+          ) : null}
+
+          <button
+            type="button"
+            onClick={() => onToggle(!open)}
+            aria-expanded={open}
+            className="rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11.5px] font-medium text-ink2 hover:border-line-strong hover:text-ink"
           >
-            ▶
-          </span>
-          Why
-        </button>
+            <span
+              aria-hidden="true"
+              className={cn('mr-1 inline-block text-[9px] transition-transform', open && 'rotate-90')}
+            >
+              ▶
+            </span>
+            Why
+          </button>
+        </div>
       </div>
 
       {open && (
@@ -289,9 +321,19 @@ const REJECTION_COLUMNS: Column<RejectionRow>[] = [
     header: 'Rule',
     sortable: true,
     value: (r) => r.rule_id,
-    render: (r) => <Chip tone="neutral">{text(r.rule_id)}</Chip>,
+    render: (r) => (
+      <Term code={r.rule_id}>
+        <Chip tone="neutral">{text(r.rule_id)}</Chip>
+      </Term>
+    ),
   },
-  { key: 'reason', header: 'Reason', sortable: true, value: (r) => r.reason, render: (r) => text(r.reason) },
+  {
+    key: 'reason',
+    header: 'Reason',
+    sortable: true,
+    value: (r) => r.reason,
+    render: (r) => <TermText code={r.reason} />,
+  },
   {
     key: 'detail',
     header: 'Detail',
@@ -338,7 +380,9 @@ function RiskRail({ rules, ctx }: { rules: RiskRule[]; ctx: Context | null }) {
             <li key={`${text(r.id, 'rule')}-${i}`} className="rounded-lg border border-line bg-sunken px-3 py-2.5">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="truncate text-[12.5px] font-medium text-ink">{text(r.label, text(r.id))}</div>
+                  <div className="truncate text-[12.5px] font-medium text-ink">
+                    <Term code={r.id}>{text(r.label, text(r.id))}</Term>
+                  </div>
                   <div className="font-mono text-[10px] text-muted">{text(r.id, '')}</div>
                 </div>
                 <RuleStateChip value={r.state} />
@@ -421,7 +465,7 @@ function RiskRail({ rules, ctx }: { rules: RiskRule[]; ctx: Context | null }) {
 type Layout = 'list' | 'cards';
 const REJECTED = '__rejected__';
 
-export function Today({ version }: { version: number }) {
+export function Today({ version, onRefresh }: { version: number; onRefresh?: () => void }) {
   const ctx = useApi<Context>('/api/context', version);
   const recs = useApi<Recommendations>('/api/recommendations', version);
   const rejections = useApi<Rejections>('/api/rejections', version);
@@ -432,6 +476,34 @@ export function Today({ version }: { version: number }) {
   const [density, setDensity] = useState<Density>('comfortable');
   const [sortBy, setSortBy] = useState<RecommendationSort>('probability');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [buyingSymbols, setBuyingSymbols] = useState<Set<string>>(new Set());
+
+  const ownedSymbols = useMemo(
+    () => new Set((portfolio.data?.positions ?? []).map((p) => p.symbol).filter((s): s is string => Boolean(s))),
+    [portfolio.data],
+  );
+
+  const handlePaperBuy = useCallback(
+    async (r: RecommendationRow) => {
+      if (!r.symbol) return;
+      const qty = r.qty && r.qty > 0 ? r.qty : r.would_qty;
+      if (!qty || qty <= 0) return;
+      setBuyingSymbols((prev) => new Set(prev).add(r.symbol!));
+      try {
+        await postJson('/api/paper/buy', { symbol: r.symbol, qty });
+        onRefresh?.();
+      } catch (err) {
+        alert(`Paper buy failed for ${r.symbol}: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        setBuyingSymbols((prev) => {
+          const next = new Set(prev);
+          next.delete(r.symbol!);
+          return next;
+        });
+      }
+    },
+    [onRefresh],
+  );
 
   const rows = useMemo(() => recs.data?.rows ?? [], [recs.data]);
   const rejRows = useMemo(() => rejections.data?.rows ?? [], [rejections.data]);
@@ -649,13 +721,25 @@ export function Today({ version }: { version: number }) {
               <ul>
                 {sortedShown.map((r) => {
                   const k = keyOf(r);
-                  return <ListRow key={k} r={r} open={expanded.has(k)} onToggle={(next) => toggleOne(k, next)} />;
+                  const sym = r.symbol ?? '';
+                  return (
+                    <ListRow
+                      key={k}
+                      r={r}
+                      open={expanded.has(k)}
+                      onToggle={(next) => toggleOne(k, next)}
+                      isOwned={sym ? ownedSymbols.has(sym) : false}
+                      onPaperBuy={handlePaperBuy}
+                      buying={sym ? buyingSymbols.has(sym) : false}
+                    />
+                  );
                 })}
               </ul>
             ) : (
               <div className="grid grid-cols-1 gap-4 p-4 2xl:grid-cols-2">
                 {sortedShown.map((r) => {
                   const k = keyOf(r);
+                  const sym = r.symbol ?? '';
                   return (
                     <RecommendationCard
                       key={k}
@@ -663,6 +747,9 @@ export function Today({ version }: { version: number }) {
                       density={density}
                       open={expanded.has(k)}
                       onToggle={(next) => toggleOne(k, next)}
+                      isOwned={sym ? ownedSymbols.has(sym) : false}
+                      onPaperBuy={handlePaperBuy}
+                      buying={sym ? buyingSymbols.has(sym) : false}
                     />
                   );
                 })}

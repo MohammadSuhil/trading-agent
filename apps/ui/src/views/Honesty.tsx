@@ -1,14 +1,16 @@
-import { useApi } from '../api/client';
-import type { Calibration, CalibrationBin, Simulation } from '../api/types';
+import { useState } from 'react';
+import { postJson, useApi } from '../api/client';
+import type { Backtest, Calibration, CalibrationBin, Simulation } from '../api/types';
 import { ApiGate } from '../components/ApiGate';
 import { DataTable, type Column } from '../components/DataTable';
 import { SufficiencyChip } from '../components/StateChip';
-import { Meter, Panel, StatTile } from '../components/primitives';
-import { TermInfo } from '../components/Tooltip';
+import { Chip, Meter, Panel, StatTile } from '../components/primitives';
+import { Term, TermInfo } from '../components/Tooltip';
 import { Reliability } from '../charts/Reliability';
 import { Histogram } from '../charts/Histogram';
+import { EquityCurve } from '../charts/EquityCurve';
 import type { Mode } from '../lib/theme';
-import { EM_DASH, EN_DASH, count, isNum, num, pctFrac, text } from '../lib/format';
+import { EM_DASH, EN_DASH, count, inr, isNum, num, pctFrac, signedPctFrac, text } from '../lib/format';
 
 /**
  * The refusal panel.
@@ -115,8 +117,24 @@ function CalibrationPanel({ data, mode }: { data: Calibration | null; mode: Mode
                 </>
               }
             />
-            <StatTile label="Resolution" value={num(data?.resolution)} footnote="as sent by the API" />
-            <StatTile label="Brier skill score" value={num(data?.bss)} footnote="as sent by the API" />
+            <StatTile
+              label="Resolution"
+              value={num(data?.resolution)}
+              footnote={
+                <>
+                  as sent by the API <TermInfo code="resolution" className="ml-1 align-middle" />
+                </>
+              }
+            />
+            <StatTile
+              label="Brier skill score"
+              value={num(data?.bss)}
+              footnote={
+                <>
+                  as sent by the API <TermInfo code="bss" className="ml-1 align-middle" />
+                </>
+              }
+            />
           </div>
           <Reliability bins={bins} mode={mode} />
           {/* The chart's table twin. */}
@@ -179,7 +197,15 @@ function SimulationPanel({ data, mode }: { data: Simulation | null; mode: Mode }
             />
             <StatTile label="Sessions" value={count(data?.n_days)} footnote={`threshold ${count(data?.needed_days)}`} />
             <StatTile label="Trades" value={count(data?.n_trades)} footnote={`threshold ${count(data?.needed_trades)}`} />
-            <StatTile label="Block length" value={count(data?.block_len)} footnote="bootstrap block" />
+            <StatTile
+              label="Block length"
+              value={count(data?.block_len)}
+              footnote={
+                <>
+                  bootstrap block <TermInfo code="block_len" className="ml-1 align-middle" />
+                </>
+              }
+            />
           </div>
           <Histogram buckets={buckets} mode={mode} />
           {data?.note && <p className="text-xs text-muted">{data.note}</p>}
@@ -189,18 +215,220 @@ function SimulationPanel({ data, mode }: { data: Simulation | null; mode: Mode }
   );
 }
 
-export function Honesty({ version, mode }: { version: number; mode: Mode }) {
-  const calibration = useApi<Calibration>('/api/calibration', version);
-  const simulation = useApi<Simulation>('/api/simulation', version);
+function SystemIntegrityPanel({
+  data,
+  mode,
+  onRefresh,
+}: {
+  data: Backtest | null;
+  mode: Mode;
+  onRefresh?: () => void;
+}) {
+  const [sessions, setSessions] = useState<number>(126);
+  const [running, setRunning] = useState<boolean>(false);
+  const [runError, setRunError] = useState<string | null>(null);
+
+  const handleRunBacktest = async () => {
+    setRunning(true);
+    setRunError(null);
+    try {
+      await postJson('/api/backtest/run', { sessions });
+      onRefresh?.();
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const statsInsufficient = data?.stats_state !== 'OK';
 
   return (
-    <ApiGate states={[calibration, simulation]}>
+    <Panel
+      title="System Integrity & Frozen Control"
+      subtitle="Cryptographic audit trails and backtest significance"
+      right={<SufficiencyChip value={data?.stats_state} />}
+    >
+      <div className="space-y-6">
+        {/* Verification badges */}
+        <div className="flex flex-wrap items-center gap-6 rounded-lg border border-line bg-sunken p-3.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <Term code="FROZEN_CONTROL">
+              <span className="text-xs font-semibold text-ink">Control Arm (weights.v1.json):</span>
+            </Term>
+            {data?.weights_verified ? (
+              <Term code="FROZEN_CONTROL">
+                <Chip tone="good" glyph="✓">Locked (v1)</Chip>
+              </Term>
+            ) : (
+              <Term code="FROZEN_CONTROL">
+                <Chip tone="warning" glyph="!">Unverified</Chip>
+              </Term>
+            )}
+            {data?.weights_sha256 && (
+              <span className="font-mono text-[11px] text-muted">
+                {data.weights_sha256.slice(0, 12)}
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Term code="LEDGER_CHAIN">
+              <span className="text-xs font-semibold text-ink">Paper Ledger Chain:</span>
+            </Term>
+            {data?.ledger_verified ? (
+              <Term code="LEDGER_CHAIN">
+                <Chip tone="good" glyph="✓">Hash-chain verified</Chip>
+              </Term>
+            ) : (
+              <Term code="LEDGER_CHAIN">
+                <Chip tone="warning" glyph="!">Unverified</Chip>
+              </Term>
+            )}
+          </div>
+        </div>
+
+        {/* Historical Backtest Controls */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-sunken p-3.5">
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-xs font-medium text-ink">
+              <span>Backtest window:</span>
+              <select
+                value={sessions}
+                onChange={(e) => setSessions(Number(e.target.value))}
+                disabled={running}
+                className="rounded border border-line bg-surface px-2.5 py-1 text-xs text-ink"
+              >
+                <option value={63}>63 sessions (~3M)</option>
+                <option value={126}>126 sessions (~6M)</option>
+                <option value={252}>252 sessions (~1Y)</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              disabled={running}
+              onClick={handleRunBacktest}
+              className="rounded-lg border border-accent bg-accent/10 px-3 py-1.5 text-xs font-semibold text-accent-ink hover:bg-accent/20 disabled:opacity-50"
+            >
+              {running ? 'Running backtest…' : 'Run historical backtest'}
+            </button>
+          </div>
+          {runError && (
+            <div className="w-full text-xs text-critical-ink">
+              {runError}
+            </div>
+          )}
+        </div>
+
+        {/* Deflated Backtest Statistics */}
+        <div>
+          <div className="mb-3">
+            <h3 className="text-sm font-semibold text-ink">Deflated Backtest Statistics</h3>
+            <p className="text-xs text-muted">Corrected for multiple testing, non-normality and track record length</p>
+          </div>
+
+          {statsInsufficient ? (
+            <Refusal
+              heading="Backtest significance is not established yet."
+              have={data?.n_sessions}
+              need={data?.needed_sessions ?? 63}
+              unit="trading sessions"
+              unitTerm="MinTRL"
+              note={text(
+                data?.note,
+                'At least 63 sessions are required before Probabilistic and Deflated Sharpe Ratios are reported.',
+              )}
+            />
+          ) : (
+            <div className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                <StatTile
+                  label="Final Equity"
+                  value={inr(data?.final_equity)}
+                  footnote="backtest end"
+                />
+                <StatTile
+                  label="Total Return"
+                  value={signedPctFrac(data?.total_return_pct, 2)}
+                  footnote="compound return"
+                />
+                <StatTile
+                  label="Annualised Sharpe"
+                  value={num(data?.sharpe, 2)}
+                  footnote="zero-risk benchmark"
+                />
+                <StatTile
+                  label="PSR"
+                  value={pctFrac(data?.psr, 1)}
+                  footnote={
+                    <>
+                      Probabilistic Sharpe <TermInfo code="PSR" className="ml-1 align-middle" />
+                    </>
+                  }
+                />
+                <StatTile
+                  label="DSR"
+                  value={pctFrac(data?.dsr, 1)}
+                  footnote={
+                    <>
+                      Deflated Sharpe <TermInfo code="DSR" className="ml-1 align-middle" />
+                    </>
+                  }
+                />
+                <StatTile
+                  label="MinTRL"
+                  value={
+                    <>
+                      {count(data?.min_trl)}{' '}
+                      <span className="text-xs font-normal text-muted">sessions</span>
+                    </>
+                  }
+                  footnote={
+                    <>
+                      Min Track Record <TermInfo code="MinTRL" className="ml-1 align-middle" />
+                    </>
+                  }
+                />
+              </div>
+
+              <div className="mt-4">
+                <div className="label mb-2">Control Arm Equity Curve</div>
+                <EquityCurve
+                  equityCurve={data?.equity_curve ?? []}
+                  benchmarkCurve={data?.benchmark_curve ?? []}
+                  mode={mode}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+export function Honesty({
+  version,
+  mode,
+  onRefresh,
+}: {
+  version: number;
+  mode: Mode;
+  onRefresh?: () => void;
+}) {
+  const calibration = useApi<Calibration>('/api/calibration', version);
+  const simulation = useApi<Simulation>('/api/simulation', version);
+  const backtest = useApi<Backtest>('/api/backtest', version);
+
+  return (
+    <ApiGate states={[calibration, simulation, backtest]}>
       <div className="space-y-6">
         <p className="max-w-3xl text-sm text-ink2">
-          These two panels exist to say what the system does <em>not</em> know. Until each has enough history, it
+          These panels exist to say what the system does <em>not</em> know. Until each has enough history, it
           reports the shortfall instead of a number — a probability the data cannot support is worse than no
           probability, because it gets acted on.
         </p>
+        <SystemIntegrityPanel data={backtest.data} mode={mode} onRefresh={onRefresh} />
         <CalibrationPanel data={calibration.data} mode={mode} />
         <SimulationPanel data={simulation.data} mode={mode} />
       </div>

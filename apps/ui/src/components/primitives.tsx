@@ -179,7 +179,7 @@ export function Hero({
   missing = false,
   missingNote,
 }: {
-  label: string;
+  label: ReactNode;
   value: ReactNode;
   delta?: ReactNode;
   footnote?: ReactNode;

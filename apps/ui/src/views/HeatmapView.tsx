@@ -23,6 +23,7 @@ const COLUMNS: Column<HeatmapRow>[] = [
     sortable: true,
     value: (r) => r.ret_1d,
     render: (r) => <Delta value={r.ret_1d} format={(v) => signedPctFrac(v)} />,
+    term: 'ret_1d',
   },
   {
     key: 'ret_5d',
@@ -31,6 +32,7 @@ const COLUMNS: Column<HeatmapRow>[] = [
     sortable: true,
     value: (r) => r.ret_5d,
     render: (r) => <Delta value={r.ret_5d} format={(v) => signedPctFrac(v)} />,
+    term: 'ret_5d',
   },
   {
     key: 'ret_21d',
@@ -39,6 +41,7 @@ const COLUMNS: Column<HeatmapRow>[] = [
     sortable: true,
     value: (r) => r.ret_21d,
     render: (r) => <Delta value={r.ret_21d} format={(v) => signedPctFrac(v)} />,
+    term: 'ret_21d',
   },
   {
     key: 'turnover_cr',
@@ -47,6 +50,7 @@ const COLUMNS: Column<HeatmapRow>[] = [
     sortable: true,
     value: (r) => r.turnover_cr,
     render: (r) => crore(r.turnover_cr),
+    term: 'turnover_cr',
   },
   {
     key: 'breadth_pct',

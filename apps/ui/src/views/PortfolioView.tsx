@@ -1,13 +1,17 @@
-import { useApi } from '../api/client';
-import type { Portfolio, PositionRow } from '../api/types';
+import { useCallback, useMemo, useState } from 'react';
+import { postJson, useApi } from '../api/client';
+import type { Portfolio, PositionRow, TradeEvent } from '../api/types';
 import { ApiGate } from '../components/ApiGate';
 import { DataTable, type Column } from '../components/DataTable';
 import { TagChip } from '../components/StateChip';
-import { Delta, Hero, Meter, Panel } from '../components/primitives';
+import { Chip, Delta, Hero, Meter, Panel } from '../components/primitives';
+import { Term, TermInfo, TermLabel } from '../components/Tooltip';
+import { EquityCurve } from '../charts/EquityCurve';
 import { Kpi } from '../components/ui';
-import { count, inr, isNum, pctFrac, price, signedInr, signedPctFrac, stamp, text } from '../lib/format';
+import type { Mode } from '../lib/theme';
+import { EM_DASH, count, inr, isNum, pctFrac, price, signedInr, signedPctFrac, stamp, text } from '../lib/format';
 
-const COLUMNS: Column<PositionRow>[] = [
+const BASE_COLUMNS: Column<PositionRow>[] = [
   {
     key: 'symbol',
     header: 'Symbol',
@@ -58,6 +62,7 @@ const COLUMNS: Column<PositionRow>[] = [
     sortable: true,
     value: (r) => r.pnl,
     render: (r) => <Delta value={r.pnl} format={(v) => signedInr(v)} />,
+    term: 'pnl',
   },
   {
     key: 'pnl_pct',
@@ -66,6 +71,7 @@ const COLUMNS: Column<PositionRow>[] = [
     sortable: true,
     value: (r) => r.pnl_pct,
     render: (r) => <Delta value={r.pnl_pct} format={(v) => signedPctFrac(v)} />,
+    term: 'pnl_pct',
   },
   {
     key: 'risk_rupees',
@@ -83,7 +89,88 @@ const COLUMNS: Column<PositionRow>[] = [
     value: (r) => r.opened,
     render: (r) => <span className="whitespace-nowrap text-ink2">{stamp(r.opened)}</span>,
   },
-  { key: 'horizon', header: 'Horizon', sortable: true, value: (r) => r.horizon, render: (r) => <TagChip value={r.horizon} /> },
+  {
+    key: 'horizon',
+    header: 'Horizon',
+    sortable: true,
+    value: (r) => r.horizon,
+    render: (r) => <TagChip value={r.horizon} />,
+    term: 'SWING',
+  },
+];
+
+const TRADE_COLUMNS: Column<TradeEvent>[] = [
+  {
+    key: 'd',
+    header: 'Date',
+    sortable: true,
+    value: (r) => r.ts ?? r.d,
+    render: (r) => <span className="whitespace-nowrap text-ink2">{stamp(r.ts ?? r.d)}</span>,
+  },
+  {
+    key: 'symbol',
+    header: 'Symbol',
+    sortable: true,
+    value: (r) => r.symbol,
+    render: (r) => <span className="font-semibold text-ink">{text(r.symbol)}</span>,
+  },
+  {
+    key: 'side',
+    header: 'Side',
+    sortable: true,
+    value: (r) => r.side,
+    render: (r) => {
+      const isBuy = r.side?.toUpperCase() === 'BUY';
+      return <Chip tone={isBuy ? 'pos' : 'neg'}>{text(r.side)}</Chip>;
+    },
+  },
+  {
+    key: 'qty',
+    header: 'Shares',
+    align: 'right',
+    sortable: true,
+    value: (r) => r.qty,
+    render: (r) => count(r.qty),
+  },
+  {
+    key: 'price',
+    header: 'Fill price',
+    align: 'right',
+    sortable: true,
+    value: (r) => r.price,
+    render: (r) => price(r.price),
+  },
+  {
+    key: 'notional',
+    header: 'Notional',
+    align: 'right',
+    sortable: true,
+    value: (r) => r.notional,
+    render: (r) => inr(r.notional),
+  },
+  {
+    key: 'cost_rupees',
+    header: 'Costs',
+    align: 'right',
+    sortable: true,
+    value: (r) => r.cost_rupees,
+    term: 'cost',
+    render: (r) => (isNum(r.cost_rupees) ? inr(r.cost_rupees) : EM_DASH),
+  },
+  {
+    key: 'pnl_rupees',
+    header: 'Realised P&L',
+    align: 'right',
+    sortable: true,
+    value: (r) => r.pnl_rupees,
+    term: 'pnl',
+    render: (r) => (isNum(r.pnl_rupees) ? <Delta value={r.pnl_rupees} format={(v) => signedInr(v)} /> : EM_DASH),
+  },
+  {
+    key: 'note',
+    header: 'Note',
+    render: (r) => <span className="text-ink2">{text(r.note, '')}</span>,
+  },
 ];
 
 /**
@@ -104,11 +191,66 @@ function toneClass(t: 'good' | 'warning' | 'critical' | undefined): string {
   return 'text-ink';
 }
 
-export function PortfolioView({ version }: { version: number }) {
+export function PortfolioView({
+  version,
+  mode,
+  onRefresh,
+}: {
+  version: number;
+  mode?: Mode;
+  onRefresh?: () => void;
+}) {
   const pf = useApi<Portfolio>('/api/portfolio', version);
   const p = pf.data;
   const positions = p?.positions ?? [];
   const drawdown = p?.drawdown_pct;
+
+  const [closingSymbols, setClosingSymbols] = useState<Set<string>>(new Set());
+
+  const handleClosePosition = useCallback(
+    async (symbol: string) => {
+      setClosingSymbols((prev) => new Set(prev).add(symbol));
+      try {
+        await postJson('/api/paper/close', { symbol });
+        onRefresh?.();
+      } catch (err) {
+        alert(`Close position failed for ${symbol}: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        setClosingSymbols((prev) => {
+          const next = new Set(prev);
+          next.delete(symbol);
+          return next;
+        });
+      }
+    },
+    [onRefresh],
+  );
+
+  const columns = useMemo<Column<PositionRow>[]>(
+    () => [
+      ...BASE_COLUMNS,
+      {
+        key: 'action',
+        header: 'Action',
+        align: 'right',
+        render: (r) => {
+          const sym = r.symbol ?? '';
+          const closing = closingSymbols.has(sym);
+          return (
+            <button
+              type="button"
+              disabled={closing || !sym}
+              onClick={() => handleClosePosition(sym)}
+              className="rounded border border-critical/40 bg-critical/10 px-2 py-0.5 text-[11px] font-medium text-critical-ink hover:bg-critical/20 disabled:opacity-50"
+            >
+              {closing ? 'Closing…' : 'Close / Sell'}
+            </button>
+          );
+        },
+      },
+    ],
+    [closingSymbols, handleClosePosition],
+  );
 
   return (
     <ApiGate states={[pf]}>
@@ -118,13 +260,17 @@ export function PortfolioView({ version }: { version: number }) {
         <div className="grid gap-4 lg:grid-cols-5">
           <section className="panel flex flex-col justify-center p-5 lg:col-span-2">
             <Hero
-              label="Equity"
+              label={
+                <span className="inline-flex items-center gap-1.5">
+                  Equity <TermInfo code="equity" />
+                </span>
+              }
               value={inr(p?.equity)}
               missing={!isNum(p?.equity)}
               missingNote="portfolio equity not reported"
               footnote={
                 <>
-                  high-water mark {inr(p?.watermark)} · {count(p?.n_positions)} open position
+                  <Term code="watermark">high-water mark</Term> {inr(p?.watermark)} · {count(p?.n_positions)} open position
                   {p?.n_positions === 1 ? '' : 's'}
                 </>
               }
@@ -132,8 +278,8 @@ export function PortfolioView({ version }: { version: number }) {
           </section>
 
           <div className="grid gap-4 sm:grid-cols-2 lg:col-span-3">
-            <Kpi label="Cash" value={inr(p?.cash)} accent="bg-[rgb(var(--nav-portfolio))]" />
-            <Kpi label="Deployed" value={inr(p?.deployed)} accent="bg-s1" />
+            <Kpi label="Cash" term="cash" value={inr(p?.cash)} accent="bg-[rgb(var(--nav-portfolio))]" />
+            <Kpi label="Deployed" term="deployed" value={inr(p?.deployed)} accent="bg-s1" />
             <Kpi
               label="Portfolio heat"
               term="portfolio heat"
@@ -162,18 +308,47 @@ export function PortfolioView({ version }: { version: number }) {
         </div>
 
         <Panel
+          title="Equity curve vs. benchmark"
+          subtitle="Paper account value alongside the Nifty Total Return Index"
+          right={<TermLabel code="TRI">Benchmark: TRI</TermLabel>}
+        >
+          <EquityCurve
+            equityCurve={p?.equity_curve ?? []}
+            benchmarkCurve={p?.benchmark_curve ?? []}
+            mode={mode ?? 'light'}
+          />
+        </Panel>
+
+        <Panel
           title="Positions"
           subtitle={`${count(positions.length)} held · quantity here is shares you actually own`}
           bodyClassName="p-0"
         >
           <DataTable
             rows={positions}
-            columns={COLUMNS}
+            columns={columns}
             rowKey={(r, i) => `${text(r.symbol, 'row')}-${i}`}
             initialSort={{ key: 'pnl', dir: 'desc' }}
             dense
             caption="Open positions with entry, stop, target and P&L"
             empty="No open positions."
+          />
+        </Panel>
+
+        <Panel
+          title="Daily trades & ledger log"
+          subtitle={`${count((p?.trades ?? []).length)} recorded fills · tamper-evident hash chain`}
+          right={<TermLabel code="LEDGER_CHAIN">LEDGER_CHAIN</TermLabel>}
+          bodyClassName="p-0"
+        >
+          <DataTable
+            rows={p?.trades ?? []}
+            columns={TRADE_COLUMNS}
+            rowKey={(r, i) => `${text(r.symbol, 'trade')}-${r.seq ?? i}`}
+            initialSort={{ key: 'd', dir: 'desc' }}
+            dense
+            caption="Ledger trade log and fills"
+            empty="No recorded paper trades yet."
           />
         </Panel>
       </div>

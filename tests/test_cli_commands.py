@@ -9,12 +9,12 @@ invisible to anyone who only ran `ta daily`.
 from __future__ import annotations
 
 import pytest
-from ta_cli.__main__ import main
+from ta_cli.__main__ import cmd_backtest, main
 
 
 @pytest.mark.parametrize("cmd", [
     "cost", "ingest", "daily", "constituents", "symbols",
-    "screen", "calendar", "status",
+    "screen", "calendar", "status", "backtest",
 ])
 def test_subcommand_is_registered_and_its_help_renders(cmd: str) -> None:
     """`--help` constructs the parser and resolves `set_defaults(fn=...)`,
@@ -33,5 +33,23 @@ def test_every_command_body_imports() -> None:
     """
     import ta_datafeed.backfill
     import ta_datafeed.store  # noqa: F401
+    import ta_quant.backtest
     import ta_quant.nightly  # noqa: F401
     from ta_core.costs import compute_costs  # noqa: F401
+
+    assert callable(cmd_backtest)
+
+
+def test_cli_daily_replay_and_date_arguments() -> None:
+    """Verify --replay and --date flags parse cleanly on ta daily."""
+    with pytest.raises(SystemExit) as e:
+        main(["daily", "--replay", "--date", "2026-10-30", "--help"])
+    assert e.value.code == 0
+
+
+def test_cli_backtest_arguments() -> None:
+    """Verify ta backtest arguments parse cleanly."""
+    with pytest.raises(SystemExit) as e:
+        main(["backtest", "--start", "2026-01-01", "--end", "2026-06-30", "--arm", "FROZEN_CONTROL", "--trials", "5", "--help"])
+    assert e.value.code == 0
+

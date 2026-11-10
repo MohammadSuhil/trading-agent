@@ -1,0 +1,13 @@
+{
+  "version": "v1",
+  "stop_atr": 1.5,
+  "target_atr": 2.0,
+  "min_expectancy_atr": 0.05,
+  "composite_weights": {
+    "mom_12_1": 0.30,
+    "ret_63d": 0.20,
+    "rs_sector": 0.25,
+    "adx14": 0.15,
+    "low_vol_21d": 0.10
+  }
+}

@@ -141,6 +141,8 @@ class Position:
     last: float
     stop: float
     opened: date
+    target: float = 0.0
+    horizon: str = "SWING"
 
     @property
     def notional(self) -> float:

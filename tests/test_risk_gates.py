@@ -7,8 +7,10 @@ green forever and is indistinguishable from one that simply never binds.
 """
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 
+import polars as pl
 import pytest
 from ta_core.enums import Regime, RuleAction, RuleState
 from ta_ledger.risk import (
@@ -20,6 +22,7 @@ from ta_ledger.risk import (
     regime_caps,
     rule_states,
 )
+from ta_quant.pipeline import run_nightly
 
 EQ = 500_000.0
 
@@ -240,3 +243,95 @@ def test_sequential_construction_actually_binds_the_industry_cap():
                        pos(f"FS{i}", "Financial Services", qty=d.qty, price=1000.0)),
         )
     assert len(accepted) <= DEFAULT.finserv_max_names
+
+
+def test_run_nightly_computes_pair_corr_and_triggers_risk_08():
+    """Verify run_nightly computes pair_corr end-to-end and triggers RISK-08."""
+    start = date(2026, 1, 1)
+    dates: list[date] = []
+    curr = start
+    while len(dates) < 30:
+        if curr.weekday() < 5:
+            dates.append(curr)
+        curr += timedelta(days=1)
+
+    decision_d = dates[-1]
+    as_of = datetime.combine(decision_d, datetime.min.time(), tzinfo=UTC) + timedelta(hours=18)
+
+    bars_list: list[dict] = []
+    p_a = 1000.0
+    p_b = 1000.0
+    p_m = 500.0
+
+    for i, d in enumerate(dates):
+        m = 0.01 if i % 2 == 0 else -0.01
+        shock = 0.02 if i % 3 == 0 else -0.02
+        r_a = m + shock
+        r_b = m + shock
+        r_m = m
+
+        prev_a, p_a = p_a, p_a * (1.0 + r_a)
+        prev_b, p_b = p_b, p_b * (1.0 + r_b)
+        prev_m, p_m = p_m, p_m * (1.0 + r_m)
+
+        kt = datetime.combine(d, datetime.min.time(), tzinfo=UTC) + timedelta(hours=18)
+        for sym, price, prev_p in [("A", p_a, prev_a), ("B", p_b, prev_b), ("M", p_m, prev_m)]:
+            bars_list.append({
+                "symbol": sym,
+                "d": d,
+                "open": round(price * 0.998, 2),
+                "high": round(price * 1.015, 2),
+                "low": round(price * 0.985, 2),
+                "close": round(price, 2),
+                "prev_close": round(prev_p, 2),
+                "volume": 200_000,
+                "turnover": round(200_000.0 * price, 2),
+                "n_trades": 20_000,
+                "series": "EQ",
+                "knowledge_time": kt,
+            })
+
+    bars = pl.DataFrame(bars_list).sort(["symbol", "d"])
+
+    members = pl.DataFrame([
+        {
+            "symbol": sym,
+            "industry": "Information Technology" if sym in ("A", "B") else "Power",
+            "company_name": f"{sym} Corporation",
+            "index_name": "NIFTY500",
+            "d": decision_d,
+            "knowledge_time": as_of,
+        }
+        for sym in ("A", "B", "M")
+    ])
+
+    # Position A has notional >= 75,000 on 500,000 equity (15% combined cap fully occupied)
+    final_a_close = float(bars.filter((pl.col("symbol") == "A") & (pl.col("d") == decision_d))["close"][0])
+    qty_a = int(75_000.0 // final_a_close) + 1
+    held_a = Position(
+        symbol="A",
+        industry="Information Technology",
+        qty=qty_a,
+        entry=final_a_close,
+        last=final_a_close,
+        stop=round(final_a_close * 0.95, 2),
+        opened=dates[0],
+    )
+    portfolio = Portfolio(
+        equity=EQ,
+        cash=EQ - held_a.notional,
+        watermark=EQ,
+        positions=(held_a,),
+    )
+
+    cfg = replace(DEFAULT, min_listed_sessions=20)
+    res = run_nightly(bars, members, d=decision_d, portfolio=portfolio, cfg=cfg, as_of=as_of)
+
+    # Candidate B must be rejected by RISK-08 due to correlation with held A
+    assert not res.rejections.is_empty()
+    b_rejections = res.rejections.filter(
+        (pl.col("symbol") == "B") & (pl.col("rule_id") == "RISK-08")
+    )
+    assert b_rejections.height >= 1
+    assert "PAIR_CORRELATION" in b_rejections["reason"].to_list()
+

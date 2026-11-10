@@ -218,7 +218,7 @@ def estimate_barriers(
     >>> e.state.value, e.p_up
     ('UNAVAILABLE', None)
     >>> e.reason
-    'library too small: n_eff 2.0 of 200 required for swing'
+    'library too small: n_eff 0.2 of 200 required for swing'
     """
     if lib.height == 0:
         return _unavailable("no resolved paths in the library", 0.0,
@@ -235,10 +235,12 @@ def estimate_barriers(
         if cell.height == 0:
             cell = lib
 
-    # Kish effective sample size. Raw row counts are deliberately never used.
+    # Kish effective sample size accounting for overlap concurrency (w ~ 1/h).
+    # Raw row counts are deliberately never used.
+    h = HORIZON_SESSIONS[horizon]
     w = cell["w"]
     sw, sw2 = float(w.sum()), float((w**2).sum())
-    n_eff = (sw * sw) / sw2 if sw2 > 0 else 0.0
+    n_eff = (sw * sw) / (h * sw2) if (sw2 > 0 and h > 0) else 0.0
 
     if n_eff < MIN_N_EFF:
         return _unavailable(

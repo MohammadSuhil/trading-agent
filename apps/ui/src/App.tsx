@@ -186,13 +186,13 @@ export default function App() {
           <main id="main" className="mx-auto w-full max-w-[1800px] flex-1 px-6 py-6">
             {/* Keyed so a crashed view resets when the reader navigates away. */}
             <ErrorBoundary key={view} onReset={refresh}>
-              {view === 'today' && <Today version={version} />}
+              {view === 'today' && <Today version={version} onRefresh={refresh} />}
               {view === 'heatmap' && <HeatmapView version={version} mode={mode} />}
               {view === 'screener' && <Screener version={version} />}
-              {view === 'portfolio' && <PortfolioView version={version} />}
+              {view === 'portfolio' && <PortfolioView version={version} mode={mode} onRefresh={refresh} />}
               {view === 'risk' && <RiskView version={version} />}
               {view === 'analysis' && <Analysis version={version} mode={mode} />}
-              {view === 'calibration' && <Honesty version={version} mode={mode} />}
+              {view === 'calibration' && <Honesty version={version} mode={mode} onRefresh={refresh} />}
               {view === 'glossary' && <GlossaryView />}
             </ErrorBoundary>
           </main>

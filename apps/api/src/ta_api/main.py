@@ -50,7 +50,7 @@ app = FastAPI(title="Trading Agent", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-    allow_methods=["GET"], allow_headers=["*"],
+    allow_methods=["GET", "POST"], allow_headers=["*"],
 )
 
 EQUITY = 500_000.0
@@ -165,6 +165,8 @@ def _latest_run(ch: GuardedClient, a: AsOf, d) -> str | None:
     shows every historical run's cards merged, each symbol repeated once per
     run. ReplacingMergeTree does not help -- the rows are genuinely distinct.
     """
+    if d is None:
+        return None
     # Hand-written because build_pit_query parenthesises `where`, which a
     # GROUP BY cannot live inside. Still bounded, and `as_of` is passed so the
     # guard checks the bound for EQUALITY rather than mere presence.
@@ -174,7 +176,13 @@ def _latest_run(ch: GuardedClient, a: AsOf, d) -> str | None:
         f"GROUP BY run_id ORDER BY max(as_of) DESC LIMIT 1",
         a,
     )
-    return runs["run_id"][0] if not runs.is_empty() else None
+    if not runs.is_empty():
+        return runs["run_id"][0]
+    rejs = ch.query_df(
+        f"SELECT run_id FROM ev.rejections WHERE d = '{d}' "
+        f"ORDER BY as_of DESC LIMIT 1"
+    )
+    return rejs["run_id"][0] if not rejs.is_empty() else None
 
 
 def _latest_session(ch: GuardedClient):
@@ -182,7 +190,9 @@ def _latest_session(ch: GuardedClient):
         "SELECT max(d) AS d FROM md.bars_1d "
         "WHERE knowledge_time <= '2099-01-01 00:00:00'"
     )
-    return df["d"][0] if df.height else None
+    if not df.height or df["d"][0] is None or str(df["d"][0]) <= "1970-01-02":
+        return None
+    return df["d"][0]
 
 
 # ------------------------------------------------------------------- glossary
@@ -282,6 +292,8 @@ def heatmap() -> dict:
     a = _now()
     with _ch() as ch:
         d = _latest_session(ch)
+        if d is None:
+            return {"as_of": None, "rows": []}
         df = ch.query_pit(
             "md.sector_daily", a,
             columns="industry, n_symbols AS n, cap_weighted_ret AS ret_1d, "
@@ -307,6 +319,8 @@ def screener(limit: int = 50) -> dict:
     limit = max(1, min(limit, 200))
     with _ch() as ch:
         d = _latest_session(ch)
+        if d is None:
+            return {"as_of": None, "rows": []}
         # Two separate PIT-bounded reads joined in polars, rather than one SQL
         # join. The guard cannot prove which table a bare `knowledge_time`
         # bound belongs to when two PIT tables are in scope, and it is right
@@ -349,6 +363,8 @@ def recommendations() -> dict:
     a = _now()
     with _ch() as ch:
         d = _latest_session(ch)
+        if d is None:
+            return {"as_of": None, "rows": []}
         run_id = _latest_run(ch, a, d)
         if run_id is None:
             return {"as_of": d.isoformat() if d else None, "rows": []}
@@ -394,6 +410,8 @@ def rejections() -> dict:
     a = _now()
     with _ch() as ch:
         d = _latest_session(ch)
+        if d is None:
+            return {"as_of": None, "rows": []}
         # ev.rejections is append-only MergeTree by design, so without pinning
         # the run every past night's rejections pile up: 124 rows from only 18
         # distinct (symbol, rule_id) facts, some repeated ten times. No
@@ -412,28 +430,119 @@ def rejections() -> dict:
 # ------------------------------------------------------------------ portfolio
 def _portfolio(ch: GuardedClient) -> Portfolio:
     try:
-        pos = ch.query_df(
-            "SELECT symbol, industry, qty, entry, last, stop, opened "
-            "FROM ev.positions WHERE status = 'OPEN'"
+        pos_df = ch.query_df(
+            "SELECT as_of, symbol, industry, qty, entry, last, stop, target, opened, horizon, sleeve, status, pnl "
+            "FROM ev.positions"
         )
-    except Exception:  # noqa: BLE001
-        pos = pl.DataFrame()
+        if not pos_df.is_empty():
+            pos_df = (
+                pos_df.sort("as_of")
+                .unique(subset=["symbol", "opened"], keep="last")
+                .filter(pl.col("status") == "OPEN")
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("positions unavailable (%s); starting flat", e)
+        pos_df = pl.DataFrame()
+
+    realised_pnl = 0.0
+    try:
+        out_df = ch.query_df(
+            "SELECT coalesce(sum(pnl_rupees), 0.0) AS realised FROM ev.outcomes "
+            "WHERE arm = 'DETERMINISTIC' AND knowledge_time <= '2099-01-01 00:00:00'"
+        )
+        if not out_df.is_empty():
+            realised_pnl = float(out_df["realised"][0] or 0.0)
+    except Exception as e:  # noqa: BLE001
+        log.debug("outcomes query unavailable: %s", e)
+
     from ta_ledger.risk import Position
     items = tuple(
-        Position(symbol=r["symbol"], industry=r["industry"], qty=int(r["qty"]),
-                 entry=float(r["entry"]), last=float(r["last"]),
-                 stop=float(r["stop"]), opened=r["opened"])
-        for r in pos.iter_rows(named=True)
-    ) if pos.height else ()
-    deployed = sum(p.notional for p in items)
-    return Portfolio(equity=EQUITY, cash=EQUITY - deployed, positions=items,
-                     watermark=EQUITY)
+        Position(
+            symbol=str(r["symbol"]),
+            industry=str(r["industry"]),
+            qty=int(r["qty"]),
+            entry=float(r["entry"]),
+            last=float(r["last"]),
+            stop=float(r["stop"]),
+            opened=r["opened"],
+            target=float(r.get("target") or 0.0),
+            horizon=str(r.get("horizon") or "SWING"),
+        )
+        for r in pos_df.iter_rows(named=True)
+    ) if not pos_df.is_empty() else ()
+
+    cost_basis = sum(p.entry * p.qty for p in items)
+    deployed = sum(p.last * p.qty for p in items)
+    cash = (EQUITY + realised_pnl) - cost_basis
+    equity = cash + deployed
+    return Portfolio(
+        equity=equity,
+        cash=cash,
+        positions=items,
+        watermark=max(EQUITY, equity),
+    )
 
 
 @app.get("/api/portfolio")
 def portfolio() -> dict:
     with _ch() as ch:
         pf = _portfolio(ch)
+        a = _now()
+        try:
+            eq_df = ch.query_df(
+                "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
+                "FROM ev.equity_daily WHERE arm = 'DETERMINISTIC' ORDER BY d ASC LIMIT 1000"
+            )
+            if eq_df.height < 2:
+                eq_df = ch.query_df(
+                    "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
+                    "FROM ev.equity_daily ORDER BY d ASC LIMIT 1000"
+                )
+            if not eq_df.is_empty():
+                eq_df = eq_df.unique(subset=["d"], keep="last").sort("d")
+            equity_curve = _rows(eq_df)
+        except Exception:  # noqa: BLE001
+            equity_curve = []
+
+        try:
+            bm_df = ch.query_pit(
+                "md.benchmark_1d", a,
+                columns="d, index_id, series_kind, close, ret_1d, tri_source",
+                order_by="d ASC", limit=1000,
+            )
+            benchmark_curve = _rows(bm_df)
+        except Exception:  # noqa: BLE001
+            benchmark_curve = []
+
+        try:
+            import json
+            trades_df = ch.query_df(
+                "SELECT seq, ts, run_id, kind, payload "
+                "FROM ev.ledger_events ORDER BY seq DESC LIMIT 100"
+            )
+            trades = []
+            for r in trades_df.iter_rows(named=True):
+                try:
+                    p_load = json.loads(r["payload"]) if isinstance(r["payload"], str) else (r["payload"] or {})
+                except (ValueError, TypeError):
+                    p_load = {}
+                trades.append({
+                    "seq": int(r["seq"]),
+                    "ts": r["ts"].isoformat() if hasattr(r["ts"], "isoformat") else str(r["ts"]),
+                    "d": p_load.get("d"),
+                    "symbol": p_load.get("symbol"),
+                    "kind": str(r["kind"]),
+                    "side": p_load.get("side"),
+                    "qty": p_load.get("qty"),
+                    "price": p_load.get("price"),
+                    "notional": p_load.get("notional"),
+                    "cost_rupees": p_load.get("cost_rupees"),
+                    "pnl_rupees": p_load.get("pnl_rupees"),
+                    "note": p_load.get("note"),
+                })
+        except Exception:  # noqa: BLE001
+            trades = []
+
         return {
             "equity": pf.equity, "cash": pf.cash, "deployed": pf.deployed,
             "n_positions": len(pf.positions),
@@ -441,14 +550,469 @@ def portfolio() -> dict:
             "watermark": max(pf.watermark, pf.equity),
             "positions": [
                 {"symbol": p.symbol, "industry": p.industry, "qty": p.qty,
-                 "entry": p.entry, "last": p.last, "stop": p.stop, "target": None,
+                 "entry": p.entry, "last": p.last, "stop": p.stop,
+                 "target": p.target if p.target > 0 else None,
                  "pnl": (p.last - p.entry) * p.qty,
                  "pnl_pct": (p.last / p.entry - 1) if p.entry else 0.0,
                  "risk_rupees": p.risk_rupees,
-                 "opened": p.opened.isoformat(), "horizon": "SWING"}
+                 "opened": p.opened.isoformat() if hasattr(p.opened, "isoformat") else str(p.opened),
+                 "horizon": p.horizon}
                 for p in pf.positions
             ],
+            "trades": trades,
+            "equity_curve": equity_curve,
+            "benchmark_curve": benchmark_curve,
         }
+
+
+# ------------------------------------------------------------------ paper trading
+@app.post("/api/paper/buy")
+def paper_buy(body: dict) -> dict:
+    """Execute a manual paper BUY order."""
+    symbol = str(body.get("symbol") or "").upper().strip()
+    if not symbol:
+        raise HTTPException(400, "symbol is required")
+
+    a = _now()
+    with _ch() as ch:
+        d = _latest_session(ch)
+        if d is None:
+            raise HTTPException(503, "no market data ingested")
+
+        # Check latest recommendations
+        rec_rows = []
+        run_id = _latest_run(ch, a, d)
+        if run_id:
+            try:
+                rec_df = ch.query_pit(
+                    RECS, a,
+                    where=f"symbol = '{symbol}' AND d = '{d}' AND run_id = '{run_id}'",
+                    limit=1,
+                )
+                rec_rows = _rows(rec_df)
+            except Exception:  # noqa: BLE001
+                rec_rows = []
+        rec = rec_rows[0] if rec_rows else {}
+
+        # Determine price, qty, stop, target
+        if body.get("price"):
+            price = float(body["price"])
+        elif rec.get("entry_lo") and rec.get("entry_hi"):
+            price = round((float(rec["entry_lo"]) + float(rec["entry_hi"])) / 2.0, 2)
+        else:
+            try:
+                bar = ch.query_pit("md.bars_1d", a, columns="close", where=f"symbol = '{symbol}' AND d = '{d}'", limit=1)
+                price = float(bar["close"][0]) if bar.height else 100.0
+            except Exception:  # noqa: BLE001
+                price = 100.0
+
+        qty = int(body.get("qty") or (rec.get("qty") if rec else None) or (rec.get("would_qty") if rec else None) or 100)
+        stop = float(body.get("stop") or (rec.get("stop") if rec else round(price * 0.95, 2)))
+        target = float(body.get("target") or (rec.get("target") if rec else round(price * 1.10, 2)))
+        industry = str(rec.get("industry") or body.get("industry") or "")
+        horizon = str(rec.get("horizon") or body.get("horizon") or "SWING")
+        sleeve = str(rec.get("sleeve") or body.get("sleeve") or "MOMENTUM_BREAKOUT")
+
+        pos_df = pl.DataFrame([{
+            "as_of": a.ts,
+            "symbol": symbol,
+            "industry": industry,
+            "qty": qty,
+            "entry": price,
+            "last": price,
+            "stop": stop,
+            "target": target,
+            "opened": d,
+            "horizon": horizon,
+            "sleeve": sleeve,
+            "status": "OPEN",
+            "pnl": 0.0,
+        }], schema={
+            "as_of": pl.Datetime("ms", "UTC"),
+            "symbol": pl.Utf8,
+            "industry": pl.Utf8,
+            "qty": pl.UInt32,
+            "entry": pl.Float64,
+            "last": pl.Float64,
+            "stop": pl.Float64,
+            "target": pl.Float64,
+            "opened": pl.Date,
+            "horizon": pl.Utf8,
+            "sleeve": pl.Utf8,
+            "status": pl.Utf8,
+            "pnl": pl.Float64,
+        })
+        ch.insert_df("ev.positions", pos_df)
+
+        from ta_ledger.events import GENESIS_HASH, EventKind, LedgerEvent, events_to_df
+        try:
+            events_df = ch.query_df("SELECT seq, ts, run_id, kind, payload, prev_hash, hash FROM ev.ledger_events ORDER BY seq ASC")
+            if not events_df.is_empty():
+                curr_seq = int(events_df["seq"].max()) + 1
+                curr_prev_hash = str(events_df["hash"][-1])
+            else:
+                curr_seq = 1
+                curr_prev_hash = GENESIS_HASH
+        except Exception:  # noqa: BLE001
+            curr_seq = 1
+            curr_prev_hash = GENESIS_HASH
+
+        event = LedgerEvent.create(
+            seq=curr_seq,
+            ts=a.ts,
+            run_id=run_id or f"MANUAL-{d}",
+            kind=EventKind.ENTRY_FILL,
+            payload={
+                "d": str(d),
+                "symbol": symbol,
+                "side": "BUY",
+                "qty": qty,
+                "price": price,
+                "notional": round(qty * price, 2),
+                "stop": stop,
+                "target": target,
+                "note": "manual paper BUY order",
+            },
+            prev_hash=curr_prev_hash,
+        )
+        ch.insert_df("ev.ledger_events", events_to_df([event]))
+
+        try:
+            pf_now = _portfolio(ch)
+            eq_df = pl.DataFrame([{
+                "d": d,
+                "arm": "DETERMINISTIC",
+                "equity": float(pf_now.equity),
+                "cash": float(pf_now.cash),
+                "deployed": float(pf_now.deployed),
+                "heat_pct": float(pf_now.heat_pct),
+                "drawdown": float(pf_now.drawdown_pct),
+                "watermark": float(pf_now.watermark),
+            }], schema={
+                "d": pl.Date,
+                "arm": pl.Utf8,
+                "equity": pl.Float64,
+                "cash": pl.Float64,
+                "deployed": pl.Float64,
+                "heat_pct": pl.Float32,
+                "drawdown": pl.Float32,
+                "watermark": pl.Float64,
+            })
+            ch.insert_df("ev.equity_daily", eq_df)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not record equity snapshot: %s", e)
+
+        return {"ok": True, "symbol": symbol, "qty": qty, "price": price}
+
+
+@app.post("/api/paper/close")
+def paper_close(body: dict) -> dict:
+    """Execute a manual paper exit / close order."""
+    symbol = str(body.get("symbol") or "").upper().strip()
+    if not symbol:
+        raise HTTPException(400, "symbol is required")
+
+    a = _now()
+    with _ch() as ch:
+        d = _latest_session(ch)
+        if d is None:
+            raise HTTPException(503, "no market data ingested")
+
+        try:
+            pos_df = ch.query_df("SELECT as_of, symbol, industry, qty, entry, last, stop, target, opened, horizon, sleeve, status, pnl FROM ev.positions")
+            if not pos_df.is_empty():
+                open_matches = (
+                    pos_df.sort("as_of")
+                    .unique(subset=["symbol", "opened"], keep="last")
+                    .filter((pl.col("status") == "OPEN") & (pl.col("symbol") == symbol))
+                    .to_dicts()
+                )
+            else:
+                open_matches = []
+        except Exception as e:
+            raise HTTPException(500, f"failed to query positions: {e}") from e
+
+        if not open_matches:
+            raise HTTPException(404, f"No open position found for {symbol}")
+
+        pos = open_matches[0]
+        pos_qty = int(pos["qty"])
+        pos_entry = float(pos["entry"])
+        exit_price = float(body.get("price") or pos["last"])
+
+        from ta_core.costs import compute_costs
+        from ta_core.enums import ProductType
+        costs = compute_costs(pos_entry * pos_qty, exit_price * pos_qty, ProductType.DELIVERY).total()
+        pnl_rupees = round((exit_price - pos_entry) * pos_qty - costs, 2)
+
+        pos_close_df = pl.DataFrame([{
+            "as_of": a.ts,
+            "symbol": symbol,
+            "industry": str(pos.get("industry") or ""),
+            "qty": pos_qty,
+            "entry": pos_entry,
+            "last": exit_price,
+            "stop": float(pos["stop"]),
+            "target": float(pos.get("target") or 0.0),
+            "opened": pos["opened"],
+            "horizon": str(pos.get("horizon") or "SWING"),
+            "sleeve": str(pos.get("sleeve") or "MOMENTUM_BREAKOUT"),
+            "status": "CLOSED",
+            "pnl": pnl_rupees,
+        }], schema={
+            "as_of": pl.Datetime("ms", "UTC"),
+            "symbol": pl.Utf8,
+            "industry": pl.Utf8,
+            "qty": pl.UInt32,
+            "entry": pl.Float64,
+            "last": pl.Float64,
+            "stop": pl.Float64,
+            "target": pl.Float64,
+            "opened": pl.Date,
+            "horizon": pl.Utf8,
+            "sleeve": pl.Utf8,
+            "status": pl.Utf8,
+            "pnl": pl.Float64,
+        })
+        ch.insert_df("ev.positions", pos_close_df)
+
+        from datetime import date as _date
+        risk_unit = (pos_entry - float(pos["stop"])) if (pos_entry - float(pos["stop"])) > 0 else 1.0
+        r_multiple = round((exit_price - pos_entry) / risk_unit, 4)
+        opened_d = pos["opened"] if isinstance(pos["opened"], _date) else datetime.strptime(str(pos["opened"]), "%Y-%m-%d").date()
+        holding_days = (d - opened_d).days
+
+        outcome_df = pl.DataFrame([{
+            "rec_id": f"P-{symbol}-{d}",
+            "symbol": symbol,
+            "arm": "DETERMINISTIC",
+            "horizon": str(pos.get("horizon") or "SWING"),
+            "entry_date": opened_d,
+            "entry_price": pos_entry,
+            "exit_date": d,
+            "exit_price": exit_price,
+            "barrier_hit": "MANUAL",
+            "r_multiple": r_multiple,
+            "pnl_rupees": pnl_rupees,
+            "mae_r": 0.0,
+            "mfe_r": 0.0,
+            "holding_days": max(0, holding_days),
+            "benchmark_ret": 0.0,
+            "stated_conf": 0.0,
+            "calibrated_p": 0.0,
+            "uniqueness_w": 1.0,
+            "regime": "UNKNOWN",
+            "degraded_mode": 0,
+            "knowledge_time": a.ts,
+        }], schema={
+            "rec_id": pl.Utf8,
+            "symbol": pl.Utf8,
+            "arm": pl.Utf8,
+            "horizon": pl.Utf8,
+            "entry_date": pl.Date,
+            "entry_price": pl.Float64,
+            "exit_date": pl.Date,
+            "exit_price": pl.Float64,
+            "barrier_hit": pl.Utf8,
+            "r_multiple": pl.Float32,
+            "pnl_rupees": pl.Float64,
+            "mae_r": pl.Float32,
+            "mfe_r": pl.Float32,
+            "holding_days": pl.UInt16,
+            "benchmark_ret": pl.Float32,
+            "stated_conf": pl.Float32,
+            "calibrated_p": pl.Float32,
+            "uniqueness_w": pl.Float32,
+            "regime": pl.Utf8,
+            "degraded_mode": pl.UInt8,
+            "knowledge_time": pl.Datetime("ms", "UTC"),
+        })
+        ch.insert_df("ev.outcomes", outcome_df)
+
+        from ta_ledger.events import GENESIS_HASH, EventKind, LedgerEvent, events_to_df
+        try:
+            events_df = ch.query_df("SELECT seq, ts, run_id, kind, payload, prev_hash, hash FROM ev.ledger_events ORDER BY seq ASC")
+            if not events_df.is_empty():
+                curr_seq = int(events_df["seq"].max()) + 1
+                curr_prev_hash = str(events_df["hash"][-1])
+            else:
+                curr_seq = 1
+                curr_prev_hash = GENESIS_HASH
+        except Exception:  # noqa: BLE001
+            curr_seq = 1
+            curr_prev_hash = GENESIS_HASH
+
+        event = LedgerEvent.create(
+            seq=curr_seq,
+            ts=a.ts,
+            run_id=f"MANUAL-{d}",
+            kind=EventKind.EXIT_FILL,
+            payload={
+                "d": str(d),
+                "symbol": symbol,
+                "side": "SELL",
+                "qty": pos_qty,
+                "price": exit_price,
+                "notional": round(pos_qty * exit_price, 2),
+                "cost_rupees": round(costs, 2),
+                "pnl_rupees": pnl_rupees,
+                "barrier_hit": "MANUAL",
+                "note": "manual paper close order",
+            },
+            prev_hash=curr_prev_hash,
+        )
+        ch.insert_df("ev.ledger_events", events_to_df([event]))
+
+        try:
+            pf_now = _portfolio(ch)
+            eq_df = pl.DataFrame([{
+                "d": d,
+                "arm": "DETERMINISTIC",
+                "equity": float(pf_now.equity),
+                "cash": float(pf_now.cash),
+                "deployed": float(pf_now.deployed),
+                "heat_pct": float(pf_now.heat_pct),
+                "drawdown": float(pf_now.drawdown_pct),
+                "watermark": float(pf_now.watermark),
+            }], schema={
+                "d": pl.Date,
+                "arm": pl.Utf8,
+                "equity": pl.Float64,
+                "cash": pl.Float64,
+                "deployed": pl.Float64,
+                "heat_pct": pl.Float32,
+                "drawdown": pl.Float32,
+                "watermark": pl.Float64,
+            })
+            ch.insert_df("ev.equity_daily", eq_df)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not record equity snapshot: %s", e)
+
+        return {"ok": True, "symbol": symbol, "pnl_rupees": pnl_rupees}
+
+
+# ------------------------------------------------------------------- backtest
+@app.get("/api/backtest")
+def backtest() -> dict:
+    a = _now()
+    with _ch() as ch:
+        try:
+            eq_df = ch.query_df(
+                "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
+                "FROM ev.equity_daily WHERE arm = 'FROZEN_CONTROL' ORDER BY d ASC LIMIT 1000"
+            )
+            if eq_df.is_empty():
+                eq_df = ch.query_df(
+                    "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
+                    "FROM ev.equity_daily ORDER BY d ASC LIMIT 1000"
+                )
+            if not eq_df.is_empty():
+                eq_df = eq_df.unique(subset=["d"], keep="last").sort("d")
+            eq_rows = _rows(eq_df)
+        except Exception:  # noqa: BLE001
+            eq_rows = []
+
+        try:
+            bm_df = ch.query_pit(
+                "md.benchmark_1d", a,
+                columns="d, index_id, series_kind, close, ret_1d, tri_source",
+                order_by="d ASC", limit=1000,
+            )
+            bm_rows = _rows(bm_df)
+        except Exception:  # noqa: BLE001
+            bm_rows = []
+
+        try:
+            from ta_quant.weights import EXPECTED_V1_SHA256, verify_v1_integrity
+            weights_verified = bool(verify_v1_integrity())
+            weights_sha256 = str(EXPECTED_V1_SHA256)
+        except Exception:  # noqa: BLE001
+            weights_verified = False
+            weights_sha256 = ""
+
+        try:
+            from ta_ledger.events import verify_chain
+            verify_chain([])
+            ledger_verified = True
+        except Exception:  # noqa: BLE001
+            ledger_verified = False
+
+        n_sessions = len(eq_rows)
+        needed_sessions = 63
+        final_equity = float(eq_rows[-1]["equity"]) if eq_rows else 500_000.0
+        init_equity = float(eq_rows[0]["equity"]) if eq_rows else 500_000.0
+        total_return_pct = round((final_equity - init_equity) / init_equity, 6) if init_equity > 0 else 0.0
+
+        outcomes_list = []
+        try:
+            out_df = ch.query_df(
+                "SELECT symbol, pnl_rupees, holding_days FROM ev.outcomes "
+                "WHERE arm = 'FROZEN_CONTROL' AND knowledge_time <= '2099-01-01 00:00:00'"
+            )
+            outcomes_list = _rows(out_df)
+        except Exception:  # noqa: BLE001
+            outcomes_list = []
+
+        if n_sessions >= 63:
+            stats_state = "OK"
+            try:
+                from ta_quant.stats import compute_backtest_stats, min_trl
+                b_stats = compute_backtest_stats(eq_rows, outcomes=outcomes_list)
+                psr_val: float | None = float(b_stats.psr)
+                dsr_val: float | None = float(b_stats.dsr)
+                m_trl = min_trl(b_stats.sharpe_annualised) if b_stats.sharpe_annualised > 0 else None
+                min_trl_val: float | None = (
+                    float(round(m_trl, 1)) if m_trl is not None and m_trl != float("inf") else None
+                )
+                sharpe_val = float(b_stats.sharpe_annualised)
+                n_trades_val = int(b_stats.n_trades)
+                win_rate_val = float(b_stats.hit_rate)
+                note_val = "Deflated performance statistics computed from historical backtest sessions."
+            except Exception as e:  # noqa: BLE001
+                psr_val, dsr_val, min_trl_val = None, None, None
+                sharpe_val, n_trades_val, win_rate_val = 0.0, 0, 0.0
+                note_val = f"Failed to compute statistics: {e}"
+        else:
+            stats_state = "INSUFFICIENT"
+            psr_val = None
+            dsr_val = None
+            min_trl_val = None
+            sharpe_val = 0.0
+            n_trades_val = 0
+            win_rate_val = 0.0
+            note_val = f"Deflated performance statistics need at least 63 trading sessions; {n_sessions} recorded so far."
+
+        return {
+            "state": "READY",
+            "arm": "FROZEN_CONTROL",
+            "weights_version": "v1",
+            "weights_verified": weights_verified,
+            "weights_sha256": weights_sha256,
+            "ledger_verified": ledger_verified,
+            "stats_state": stats_state,
+            "n_sessions": n_sessions,
+            "needed_sessions": needed_sessions,
+            "final_equity": final_equity,
+            "total_return_pct": total_return_pct,
+            "sharpe": sharpe_val,
+            "n_trades": n_trades_val,
+            "win_rate": win_rate_val,
+            "psr": psr_val,
+            "dsr": dsr_val,
+            "min_trl": min_trl_val,
+            "note": note_val,
+            "equity_curve": eq_rows,
+            "benchmark_curve": bm_rows,
+        }
+
+
+@app.post("/api/backtest/run")
+def run_backtest_api(body: dict | None = None) -> dict:
+    """Trigger a historical backtest execution and persist results."""
+    from ta_quant.nightly import execute_backtest
+    sessions = int((body or {}).get("sessions") or 126)
+    execute_backtest(sessions=sessions, persist_results=True)
+    return backtest()
 
 
 # ----------------------------------------------------------------------- risk
@@ -456,6 +1020,8 @@ def portfolio() -> dict:
 def risk() -> dict:
     with _ch() as ch:
         d = _latest_session(ch)
+        if d is None:
+            return {"as_of": None, "regime": Regime.UNKNOWN.value, "rules": []}
         pf = _portfolio(ch)
         try:
             b = _rows(ch.query_pit(
@@ -481,6 +1047,8 @@ def risk() -> dict:
 def industries() -> dict:
     with _ch() as ch:
         d = _latest_session(ch)
+        if d is None:
+            return {"as_of": None, "rows": []}
         pf = _portfolio(ch)
         cfg = DEFAULT
         names = sorted({p.industry for p in pf.positions})

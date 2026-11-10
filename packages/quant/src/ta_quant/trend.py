@@ -71,14 +71,22 @@ def _hac_t_stat(ret: pl.Expr, n: int, s: pl.Expr) -> pl.Expr:
 
     var = gamma0
     for k in range(1, lag + 1):
-        gamma_k = (ret * ret.shift(k).over(s)).rolling_mean(n).over(s) - mean**2
+        cov = (ret * ret.shift(k).over(s)).rolling_mean(n).over(s)
+        gamma_k = pl.when(cov.is_not_null()).then(cov - mean**2).otherwise(0.0)
         var = var + 2.0 * (1.0 - k / (lag + 1.0)) * gamma_k
 
     # A HAC variance can go negative in small samples; clamp to a tiny positive
-    # so the t-stat is finite and the row is simply uninformative rather than
-    # null-propagating through every downstream comparison.
-    var = pl.when(var > 1e-12).then(var).otherwise(1e-12)
-    return mean / (var / n).sqrt()
+    # so the t-stat is finite. When mean is zero (flat series), drift is strictly zero.
+    safe_var = pl.when(var > 1e-12).then(var).otherwise(1e-12)
+    t_stat = mean / (safe_var / n).sqrt()
+
+    return (
+        pl.when(mean.is_null())
+        .then(None)
+        .when(mean == 0.0)
+        .then(0.0)
+        .otherwise(t_stat)
+    )
 
 
 def _efficiency_ratio(close: pl.Expr, n: int, s: pl.Expr) -> pl.Expr:

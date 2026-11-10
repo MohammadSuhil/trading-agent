@@ -71,7 +71,37 @@ def cmd_daily(a: argparse.Namespace) -> int:
     t0 = datetime.now()
     end = _d(a.end) if a.end else date.today()
     start = end - timedelta(days=a.days)
+    if a.days == 7:
+        try:
+            from ta_datafeed.store import GuardedClient
+            with GuardedClient() as ch:
+                n_bars = ch.query_admin("SELECT uniqExact(d) AS n FROM md.bars_1d")["n"][0]
+            if n_bars < 75:
+                start = end - timedelta(days=max(a.days, 115))
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).debug("could not check md.bars_1d session count: %s", e)
     rc = 0
+
+    if getattr(a, "replay", False):
+        target_d = _d(a.date) if getattr(a, "date", None) else None
+        print(f"[replay] re-deriving recommendations for session {target_d or 'latest'} from record at session as-of")
+        try:
+            res = execute_nightly(target_d, replay=True)
+            buy = (
+                res.recommendations.filter(res.recommendations["action"] == "BUY").height
+                if res.recommendations.height
+                else 0
+            )
+            print(f"      run_id={res.run_id} session={res.d} regime={res.regime.value}")
+            print(
+                f"      cards={res.recommendations.height} (BUY={buy}) "
+                f"rejected={res.rejections.height}"
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"      FAILED: {e}")
+            rc = 1
+        print(f"done in {(datetime.now() - t0).total_seconds():.0f}s, rc={rc}")
+        return rc
 
     print(f"[1/4] ingest {start} .. {end}")
     try:
@@ -176,6 +206,31 @@ def cmd_calendar(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backtest(a: argparse.Namespace) -> int:
+    """Run historical backtest simulation over recent sessions."""
+    from ta_quant.nightly import execute_backtest
+
+    sessions = getattr(a, "sessions", 126) or 126
+    print(f"Running historical backtest over {sessions} sessions...")
+    res = execute_backtest(sessions=sessions, persist_results=True)
+
+    print("=" * 60)
+    print("BACKTEST RESULTS: FROZEN_CONTROL")
+    print(f"  Period               : {res['start_date']} .. {res['end_date']}")
+    print(f"  Sessions             : {res['n_sessions']}")
+    print(f"  Initial Equity       : Rs {res['initial_equity']:,.2f}")
+    print(f"  Final Equity         : Rs {res['final_equity']:,.2f}")
+    print(f"  Total Return         : {res['total_return_pct']:+.2f}%")
+    print(f"  Sharpe (Annualised)  : {res['sharpe']:.2f}")
+    print(f"  Trades               : {res['n_trades']}")
+    print(f"  Win Rate             : {res['win_rate']:.2%}")
+    print(f"  PSR (Prob Sharpe)    : {res['psr']:.2%}")
+    print(f"  DSR (Deflated Sharpe): {res['dsr']:.2%}")
+    print(f"  Min TRL              : {res['min_trl']}")
+    print("=" * 60)
+    return 0
+
+
 def cmd_status(a: argparse.Namespace) -> int:
     from ta_datafeed.store import GuardedClient
     with GuardedClient() as ch:
@@ -214,7 +269,17 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--end", help="last session to ingest, YYYY-MM-DD")
     c.add_argument("--days", type=int, default=7,
                    help="how far back to ingest; cached files cost nothing")
+    c.add_argument("--date", help="target session YYYY-MM-DD (for --replay)")
+    c.add_argument("--replay", action="store_true", help="re-derive recommendations from record at session as-of")
     c.set_defaults(fn=cmd_daily)
+
+    c = sub.add_parser("backtest", help="run historical backtest simulation")
+    c.add_argument("--sessions", type=int, default=126, help="number of historical sessions to simulate")
+    c.add_argument("--start", help="start date YYYY-MM-DD")
+    c.add_argument("--end", help="end date YYYY-MM-DD")
+    c.add_argument("--arm", default="FROZEN_CONTROL", help="arm to simulate (FROZEN_CONTROL, DETERMINISTIC)")
+    c.add_argument("--trials", type=int, default=1, help="number of trials for deflated Sharpe")
+    c.set_defaults(fn=cmd_backtest)
 
     c = sub.add_parser("constituents", help="snapshot index membership + industries")
     c.add_argument("--indices", nargs="+",
