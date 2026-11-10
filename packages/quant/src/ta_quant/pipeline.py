@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from typing import Any
@@ -38,6 +39,11 @@ from ta_core.enums import (
     Regime,
     Sleeve,
     TrendState,
+)
+from ta_core.ports import (
+    EdgeEstimatorPort,
+    FeatureProviderPort,
+    ProbabilityCalibratorPort,
 )
 from ta_ledger.risk import (
     DEFAULT,
@@ -102,7 +108,12 @@ class RunResult:
     regime: Regime
 
 
-def build_panel(bars: pl.DataFrame, members: pl.DataFrame) -> pl.DataFrame:
+def build_panel(
+    bars: pl.DataFrame,
+    members: pl.DataFrame,
+    *,
+    feature_providers: Sequence[FeatureProviderPort] = (),
+) -> pl.DataFrame:
     """Factors + trend + industry labels for the whole panel.
 
     `members` carries the DATED industry label. Joining today's membership onto
@@ -110,11 +121,16 @@ def build_panel(bars: pl.DataFrame, members: pl.DataFrame) -> pl.DataFrame:
     caller must pass a snapshot read through the PIT guard.
     """
     panel = add_trend_states(add_price_factors(bars))
-    return panel.join(
+    joined = panel.join(
         members.select(["symbol", "industry", "company_name"]).unique(subset=["symbol"]),
         on="symbol",
         how="left",
     ).with_columns(pl.col("industry").fill_null("Unclassified"))
+    for provider in feature_providers:
+        res = provider.compute(joined)
+        if isinstance(res, pl.DataFrame):
+            joined = res
+    return joined
 
 
 def sector_aggregates(
@@ -412,6 +428,9 @@ def run_nightly(
     as_of: datetime | None = None,
     surveillance_symbols: set[str] | None = None,
     run_id: str | None = None,
+    feature_providers: Sequence[FeatureProviderPort] = (),
+    edge_estimator: EdgeEstimatorPort | None = None,
+    calibrator: ProbabilityCalibratorPort | None = None,
 ) -> RunResult:
     """Produce the night's ranked trade plans and the rejection log.
 
@@ -422,7 +441,11 @@ def run_nightly(
     run_id = run_id or uuid.uuid4().hex[:12]
     as_of = as_of or datetime.now(UTC)
 
-    panel = build_panel(bars, members)
+    panel = (
+        build_panel(bars, members, feature_providers=feature_providers)
+        if feature_providers
+        else build_panel(bars, members)
+    )
     trade_syms = set(
         members.filter(pl.col("index_name") == tradeable_index)["symbol"].to_list()
     )
@@ -615,10 +638,23 @@ def run_nightly(
             k_dn=K_DN,
         )
         if est.p_up is not None and est.p_dn is not None:
+            if edge_estimator is not None or calibrator is not None:
+                edge_adj = float(edge_estimator.estimate_edge(row, est)) if edge_estimator is not None else 0.0
+                raw_p_up = min(1.0, max(0.0, float(est.p_up) + edge_adj))
+                p_up_eff = (
+                    min(1.0, max(0.0, float(calibrator.calibrate(raw_p_up, horizon=Horizon.SWING.value, regime=regime.value))))
+                    if calibrator is not None
+                    else raw_p_up
+                )
+                p_dn_eff = max(0.0, min(1.0 - p_up_eff, float(est.p_dn) - (p_up_eff - float(est.p_up))))
+            else:
+                p_up_eff = float(est.p_up)
+                p_dn_eff = float(est.p_dn)
+
             cost_atr_nom = (nom_bps / 10_000.0) * float(price) / float(atr)
             pre_exp = (
-                (TARGET_ATR * (est.p_up or 0.0))
-                - (STOP_ATR * (est.p_dn or 0.0))
+                (TARGET_ATR * p_up_eff)
+                - (STOP_ATR * p_dn_eff)
                 - cost_atr_nom
             )
         else:
@@ -775,11 +811,28 @@ def run_nightly(
             horizon=Horizon.SWING, k_up=K_UP, k_dn=K_DN,
         )
 
+        if est.p_up is not None and est.p_dn is not None:
+            if edge_estimator is not None or calibrator is not None:
+                edge_adj = float(edge_estimator.estimate_edge(row, est)) if edge_estimator is not None else 0.0
+                raw_p_up = min(1.0, max(0.0, float(est.p_up) + edge_adj))
+                p_up_eff = (
+                    min(1.0, max(0.0, float(calibrator.calibrate(raw_p_up, horizon=Horizon.SWING.value, regime=regime.value))))
+                    if calibrator is not None
+                    else raw_p_up
+                )
+                p_dn_eff = max(0.0, min(1.0 - p_up_eff, float(est.p_dn) - (p_up_eff - float(est.p_up))))
+            else:
+                p_up_eff = float(est.p_up)
+                p_dn_eff = float(est.p_dn)
+        else:
+            p_up_eff = None
+            p_dn_eff = None
+
         # Expectancy in ATR units, AFTER costs. A candidate that cannot clear
         # its own frictions is not a trade, however good the signal looks.
-        gross_atr = (TARGET_ATR * (est.p_up or 0.0)) - (STOP_ATR * (est.p_dn or 0.0))
+        gross_atr = ((TARGET_ATR * p_up_eff) - (STOP_ATR * p_dn_eff)) if p_up_eff is not None and p_dn_eff is not None else 0.0
         cost_atr = (cost_bps / 10_000.0) * float(price) / float(atr)
-        expectancy = gross_atr - cost_atr if est.p_up is not None else 0.0
+        expectancy = gross_atr - cost_atr if p_up_eff is not None else 0.0
 
         tradeable = expectancy >= MIN_EXPECTANCY_ATR
         if tradeable:

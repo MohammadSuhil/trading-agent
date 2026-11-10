@@ -185,6 +185,7 @@ These resolve every ambiguous case downstream:
 | LLM runtime | **llama.cpp `llama-server`, router mode** | GBNF gives token-level schema guarantees. SIGTERM = guaranteed unload. ⚠️ *Corrected 2026-10-31:* `--models-max 1` is **a policy you must verify, not a structural invariant**. Router mode is self-labelled experimental (#18035); a TOCTOU race in `unload_lru()` was reported at exactly `--models-max 1` (#20137, closed "not planned" by a stale-bot with only an unlinked partial fix); and `-cram` is applied per-child, so the memory budget is per-model, not global. Assert `GET /models` returns **≤1 before every load**, not merely empty after the stage. Calling something structural that isn't means an OOM has a cause you have architecturally excluded from consideration. |
 | Reasoner | **Qwen3.6-35B-A3B**, 4-bit GGUF | 36B total / **3B active**. M5 Pro is bandwidth-bound: a dense 27B reads ~15 GB per token-step; a 3B-active MoE reads ~1.9 GB. Verified on HF (4.7M downloads). |
 | Red team | **gpt-oss:20b** (14 GB) | *Different model family* — a critique from the same weights that wrote the thesis is theatre. |
+| Tabular ML / Meta-Labeler | **LightGBM (CPU, purged walk-forward)** | Captures non-linear regime × sector × factor × event interactions over 1.4M+ bar rows in <2s on CPU with zero GPU/VRAM footprint. Sits between the linear factor baseline and the LLM Committee. |
 | Frontend | **Vite + React + Tailwind + shadcn**, lightweight-charts + d3 treemap | SSR is pointless for localhost. |
 
 **No Docker, no colima.** Apple's `vz` hypervisor does not return freed guest memory to macOS ([lima#2789](https://github.com/lima-vm/lima/issues/2789), open), so `--memory 10` is a one-way high-water mark. All databases run natively.
@@ -244,11 +245,12 @@ Also: context is capped at **32k**. The same model measures 19.3 GB @1k, 22.4 GB
 | D5 | **Extractor** | HTML → markdown + tables + images (trafilatura; Chromium batch only on failure) |
 | D6 | **Doc Parser** | Filing PDFs/XBRL → markdown tables (docling), gated to high-value filings × watchlist |
 | D7 | **Entity Linker** | Text → symbol + ISIN. Deterministic exact-join first (54% hit rate, free), NuNER on the residual |
-| D8 | **Quant Engine** | ~70 factors, hard gates, composite, costs, sizing, triple-barrier labels |
+| D8 | **Quant Engine** | ~70 factors, hard gates, composite, PM Conviction Score (`_pm_conviction`: composite + conservative lower-bound expectancy at `ci_lo` + multi-horizon stock/industry trend alignment - marginal pair correlation), Paced Top-N Auto-Buy (`regime_caps["new"]`: 3/day `TREND_UP`, 2/day `CHOP`, 1/day `TREND_DOWN`/`HIGH_VOL`), Slot & Industry Competition (`ROTATE_WEAKEST`), 5-Trigger Daily Exit Engine (`STOP_DISCIPLINE`, `TARGET_REACHED`, `TIME_STOP`, `TREND_REVERSAL`, `ROTATE_WEAKEST` + `STOP_TRAILED`), costs, sizing, triple-barrier labels |
+| D8b | **GBDT Meta-Labeler** | LightGBM CPU purged walk-forward classifier on resolved triple-barrier paths (`exit_date < decision_d`, 10-session embargo, `uniqueness_w` sample weights, shallow `max_depth=4, num_leaves=15, min_child_samples=200`), calibrated via PIT isotonic regression, gated by out-of-sample Brier Skill Score (`BSS > 0`), and outputting per-candidate SHAP feature attributions into the `D10` Dossier |
 | D9 | **Regime** | 3-state Gaussian HMM, hand-rolled (`hmmlearn` is abandoned — last commit 2024-10-31). **Filtered, never smoothed** — smoothed leaks the future. Risk gate only, never a signal flipper. |
 | D10 | **Dossier Builder** | The ~1,500-token fact sheet, with mandatory **CONTRADICTIONS** and **KNOWN GAPS** sections |
 | D11 | **Paper Broker** | Fill simulation + full Indian cost model + ledger events |
-| D12 | **Evaluator** | Triple-barrier resolution, attribution, posteriors, calibration |
+| D12 | **Evaluator** | Triple-barrier resolution, `resolve_past_recommendations` (`SHADOW_BUY` / `SHADOW_WATCH` evaluating every recommended card against subsequent daily bars so calibration at `n_eff >= 30` and selection-regret tracking converge ~10× faster), attribution, posteriors, calibration |
 
 ### The committee — your "team of fund managers"
 
@@ -556,16 +558,25 @@ size, stop, target or rank, and never the sole reason code on a recommendation.
 
 ## The learning loop
 
-### Four arms, every night, scored identically
+### Five arms, every night, scored identically
 
 | Arm | What it is | What it proves |
 | --- | --- | --- |
-| `frozen_control` | the day-1 rule screener, **`weights.v1.json` frozen forever** | **If the "learned" system can't beat this in 6 months, the learning is cosmetic.** The single most valuable number in the project. |
-| `deterministic` | current screener + ML, top-k taken blindly, no LLM | isolates the committee's actual contribution |
-| `committee` | the full persona pipeline | the product |
-| `random` | 2% of risk to random candidates passing hard gates | the true zero line, *including real costs* |
+| `random` | 2% of risk to random candidates passing hard gates | the true zero line, *including real costs* (must lose after costs) |
+| `frozen_control` | the day-1 rule screener, **`weights.v1.json` frozen forever** + ATR-bucket `p_base` | **If the "learned" system can't beat this in 6 months, the learning is cosmetic.** The single most valuable number in the project. |
+| `deterministic` | current screener, linear composite + PM Conviction Score + Thompson-bandit sleeve weights | baseline quantitative execution |
+| `gbdt_meta` | Purged walk-forward LightGBM + isotonic calibration over price + trend + regime + news/event features | non-linear tabular ML meta-labeler predicting barrier win probability |
+| `committee` | the full persona pipeline debating over `D10` dossiers containing `GBDT_META` probabilities & SHAP drivers | the LLM reasoning product |
 
-Cost: ~40 extra ledger rows/day. **Two demotion rules are pre-committed on day one, not retrofitted when you're emotionally invested:** if `committee` doesn't beat `deterministic` after 200 resolved trades it is demoted to narration-only; if the Red Team shows no discriminative power after 100 challenges it is cut and its 14 GB reclaimed.
+Cost: ~50 extra ledger rows/day. **Demotion and promotion rules are pre-committed on day one, not retrofitted when you're emotionally invested:** `committee` (LLM) must beat `gbdt_meta` (not merely static linear weights) over 200 resolved trades to earn live capital promotion; otherwise `gbdt_meta` runs the book and the LLM remains an explanatory/veto shadow layer. If the Red Team shows no discriminative power after 100 challenges it is cut and its 14 GB reclaimed.
+
+### The Five Architectural Surprises & Guardrails
+
+1. **Surprise 1 — The Missing Middle & Promotion Bar:** A purely linear factor model leaves substantial non-linear alpha (e.g. momentum only works when vol is low and market regime is `TREND_UP`) on the table, while LLMs cannot compute or aggregate 1.4M rows of price interactions. `GBDT_META` fills this missing middle. Consequently, `COMMITTEE` (LLM) must beat `GBDT_META` (not merely static linear weights) over 200 resolved trades to earn live capital promotion; otherwise `GBDT_META` runs the book and the LLM remains an explanatory/veto shadow layer.
+2. **Surprise 2 — Overlapping Label Leakage in Time-Series GBDTs:** A 10-session swing barrier started at $t-5$ is still open at $t$. Training a tree at $t$ on any path whose `exit_date >= d` leaks future index moves across all 500 stocks simultaneously. Enforce strict `exit_date < d` purging, a 10-session embargo, and uniqueness weighting (`uniqueness_w`).
+3. **Surprise 3 — Shadow Recommendation Bias (`SHADOW_BUY` / `SHADOW_WATCH`):** Shadow outcomes accelerate `n_eff` by 10× for barrier calibration (`p_up`), but live portfolio sizing/bandit updates must weight live fills (`DETERMINISTIC`) separately from `SHADOW_WATCH` so unbought tail names don't skew portfolio-level Sharpe.
+4. **Surprise 4 — Replay Determinism (`ADR-0002`) for ML Models:** Just as LLM token streams and `weights.v1.json` are SHA256-pinned in `RunManifest`, every nightly LightGBM model binary (`lgbm_meta_<run_id>.txt`) and isotonic calibrator must be hashed in `RunManifest` so `ta daily --replay` reproduces exact numbers without refitting.
+5. **Surprise 5 — News & Event Ablation (`M7`):** Event/news features (`nx.news_features`) are tested both standalone (Rank-IC `>= 0.020`) and via a `GBDT_WITH_NEWS` vs `GBDT_PRICE_ONLY` out-of-sample Brier Skill Score (`ΔBSS > 0`) gate before entering live models.
 
 ### Labelling, attribution, calibration
 

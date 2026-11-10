@@ -94,7 +94,7 @@ class Sleeve(StrEnum):
 
 
 class Arm(StrEnum):
-    """The four arms scored identically every night.
+    """Arms scored identically every night.
 
     FROZEN_CONTROL is the single most valuable number in the project: if the
     'learned' system cannot beat day-1 rules, the learning is cosmetic.
@@ -102,8 +102,11 @@ class Arm(StrEnum):
 
     FROZEN_CONTROL = "FROZEN_CONTROL"
     DETERMINISTIC = "DETERMINISTIC"
+    GBDT_META = "GBDT_META"
     COMMITTEE = "COMMITTEE"
     RANDOM = "RANDOM"
+    SHADOW_BUY = "SHADOW_BUY"
+    SHADOW_WATCH = "SHADOW_WATCH"
 
 
 class BarrierHit(StrEnum):

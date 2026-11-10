@@ -22,6 +22,11 @@ from ta_core.enums import (
     Sleeve,
     TrendState,
 )
+from ta_core.ports import (
+    EdgeEstimatorPort,
+    FeatureProviderPort,
+    ProbabilityCalibratorPort,
+)
 from ta_ledger.broker.base import BarData, Order
 from ta_ledger.broker.paper import PaperBroker, apply_costs, simulate_fill
 from ta_ledger.events import LedgerEvent
@@ -184,6 +189,9 @@ def _screen_session(
     max_cards: int = 25,
     lib: pl.DataFrame | None = None,
     ind_tr: pl.DataFrame | None = None,
+    feature_providers: Sequence[FeatureProviderPort] = (),
+    edge_estimator: EdgeEstimatorPort | None = None,
+    calibrator: ProbabilityCalibratorPort | None = None,
 ) -> pl.DataFrame:
     """Screen candidates for session d using precomputed factor panel."""
     trade_syms = set(members.filter(pl.col("index_name") == tradeable_index)["symbol"].to_list())
@@ -239,10 +247,23 @@ def _screen_session(
             k_dn=K_DN,
         )
         if est.p_up is not None and est.p_dn is not None:
+            if edge_estimator is not None or calibrator is not None:
+                edge_adj = float(edge_estimator.estimate_edge(row, est)) if edge_estimator is not None else 0.0
+                raw_p_up = min(1.0, max(0.0, float(est.p_up) + edge_adj))
+                p_up_eff = (
+                    min(1.0, max(0.0, float(calibrator.calibrate(raw_p_up, horizon=Horizon.SWING.value, regime=regime.value))))
+                    if calibrator is not None
+                    else raw_p_up
+                )
+                p_dn_eff = max(0.0, min(1.0 - p_up_eff, float(est.p_dn) - (p_up_eff - float(est.p_up))))
+            else:
+                p_up_eff = float(est.p_up)
+                p_dn_eff = float(est.p_dn)
+
             cost_atr_nom = (nom_bps / 10_000.0) * float(price) / float(atr)
             pre_exp = (
-                (TARGET_ATR * (est.p_up or 0.0))
-                - (STOP_ATR * (est.p_dn or 0.0))
+                (TARGET_ATR * p_up_eff)
+                - (STOP_ATR * p_dn_eff)
                 - cost_atr_nom
             )
         else:
@@ -325,9 +346,26 @@ def _screen_session(
             k_dn=K_DN,
         )
 
-        gross_atr = (TARGET_ATR * (est.p_up or 0.0)) - (STOP_ATR * (est.p_dn or 0.0))
+        if est.p_up is not None and est.p_dn is not None:
+            if edge_estimator is not None or calibrator is not None:
+                edge_adj = float(edge_estimator.estimate_edge(row, est)) if edge_estimator is not None else 0.0
+                raw_p_up = min(1.0, max(0.0, float(est.p_up) + edge_adj))
+                p_up_eff = (
+                    min(1.0, max(0.0, float(calibrator.calibrate(raw_p_up, horizon=Horizon.SWING.value, regime=regime.value))))
+                    if calibrator is not None
+                    else raw_p_up
+                )
+                p_dn_eff = max(0.0, min(1.0 - p_up_eff, float(est.p_dn) - (p_up_eff - float(est.p_up))))
+            else:
+                p_up_eff = float(est.p_up)
+                p_dn_eff = float(est.p_dn)
+        else:
+            p_up_eff = None
+            p_dn_eff = None
+
+        gross_atr = ((TARGET_ATR * p_up_eff) - (STOP_ATR * p_dn_eff)) if p_up_eff is not None and p_dn_eff is not None else 0.0
         cost_atr = (cost_bps / 10_000.0) * float(price) / float(atr)
-        expectancy = gross_atr - cost_atr if est.p_up is not None else 0.0
+        expectancy = gross_atr - cost_atr if p_up_eff is not None else 0.0
 
         tradeable = expectancy >= MIN_EXPECTANCY_ATR
         if tradeable and new_entries_today >= new_cap:
@@ -416,6 +454,9 @@ def run_backtest(
     warmup_sessions: int = 30,
     include_watch_for_backtest: bool = False,
     force_entry_on_positive_rr: bool = False,
+    feature_providers: Sequence[FeatureProviderPort] = (),
+    edge_estimator: EdgeEstimatorPort | None = None,
+    calibrator: ProbabilityCalibratorPort | None = None,
 ) -> BacktestResult:
     """Execute historical backtest over daily bars without lookahead bias.
 
@@ -458,7 +499,7 @@ def run_backtest(
         )
 
     # Build the full factor and trend panel once (strictly trailing per symbol)
-    panel = build_panel(bars, members)
+    panel = build_panel(bars, members, feature_providers=feature_providers)
 
     trade_syms = set(members.filter(pl.col("index_name") == tradeable_index)["symbol"].to_list())
     configured_score_syms = set(members.filter(pl.col("index_name") == scored_index)["symbol"].to_list())
@@ -511,6 +552,9 @@ def run_backtest(
             max_cards=max_cards,
             lib=precomputed_lib,
             ind_tr=precomputed_ind_tr,
+            feature_providers=feature_providers,
+            edge_estimator=edge_estimator,
+            calibrator=calibrator,
         )
 
         if not recs_df.is_empty():

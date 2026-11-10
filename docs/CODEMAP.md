@@ -104,6 +104,14 @@ Abstract port interfaces for market data and broker adapters.
 - `class BrokerPort(Protocol)` -- Abstract port for order simulation, submission, and state queries.
   - `submit_order(self, intent: OrderIntent) -> Fill` -- Submit an order intent for execution, returning the fill result.
   - `cancel_order(self, order_id: str) -> bool` -- Cancel an open order by ID, returning True if cancelled.
+- `class DataSourcePort(Protocol)` -- Abstract port for raw market/alternative data fetchers.
+  - `fetch(self, d: date, *, as_of: AsOf | datetime | None=None) -> object` -- Fetch raw data for session d bounded by knowledge_time <= as_of.
+- `class FeatureProviderPort(Protocol)` -- Abstract port for computing additional feature sets over a panel.
+  - `compute(self, panel: object, *, d: date | None=None, as_of: AsOf | datetime | None=None) -> object` -- Compute and append additional feature columns to panel.
+- `class EdgeEstimatorPort(Protocol)` -- Abstract port for model-driven edge estimators (e.g. GBDT meta-labeler).
+  - `estimate_edge(self, row: Mapping[str, object], base_estimate: object) -> float` -- Estimate incremental edge (additive probability adjustment) for a candidate row.
+- `class ProbabilityCalibratorPort(Protocol)` -- Abstract port for point-in-time probability calibration (e.g. isotonic).
+  - `calibrate(self, p_raw: float, *, horizon: str='SWING', regime: str='UNKNOWN') -> float` -- Map raw model probability to calibrated empirical win probability.
 
 ### `packages/core/src/ta_core/settings.py`
 

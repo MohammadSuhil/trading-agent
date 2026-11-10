@@ -14,7 +14,7 @@ from typing import Any
 import polars as pl
 from ta_core.asof import AsOf
 from ta_core.costs import compute_costs
-from ta_core.enums import ProductType
+from ta_core.enums import Arm, ProductType
 from ta_core.timefmt import IST
 from ta_datafeed.adjust import apply_adjustments, infer_corporate_actions
 from ta_datafeed.sources.surveillance import load_surveillance_symbols
@@ -343,7 +343,7 @@ def resolve_past_recommendations(
             eval_qty = int(rec.get("qty") or rec.get("would_qty") or 1)
             costs = compute_costs(entry_price * eval_qty, exit_price * eval_qty, ProductType.DELIVERY).total()
             pnl_rupees = round((exit_price - entry_price) * eval_qty - costs, 2)
-            arm = "SHADOW_BUY" if rec.get("action") == "BUY" else "SHADOW_WATCH"
+            arm = Arm.SHADOW_BUY.value if rec.get("action") == "BUY" else Arm.SHADOW_WATCH.value
             p_up = float(rec.get("p_up") or 0.0)
             exit_d = exit_date if isinstance(exit_date, date) else datetime.strptime(str(exit_date), "%Y-%m-%d").date()
 

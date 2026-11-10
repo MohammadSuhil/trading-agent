@@ -68,6 +68,8 @@ class RunManifest:
     weights_sha: str
     config_sha: str
     stage_tuple_sha: str = ""
+    ml_model_sha: str = ""
+    calibrator_sha: str = ""
     data_quality: str = "FULL"
     model_tier: str = "NONE"
     degraded_mode: bool = False
@@ -88,6 +90,8 @@ class RunManifest:
             "weights_sha": self.weights_sha,
             "config_sha": self.config_sha,
             "stage_tuple_sha": self.stage_tuple_sha,
+            "ml_model_sha": self.ml_model_sha,
+            "calibrator_sha": self.calibrator_sha,
             "data_quality": self.data_quality,
             "model_tier": self.model_tier,
             "degraded_mode": self.degraded_mode,
@@ -122,6 +126,8 @@ class RunManifest:
             weights_sha=str(data["weights_sha"]),
             config_sha=str(data["config_sha"]),
             stage_tuple_sha=str(data.get("stage_tuple_sha", "")),
+            ml_model_sha=str(data.get("ml_model_sha", "")),
+            calibrator_sha=str(data.get("calibrator_sha", "")),
             data_quality=str(data.get("data_quality", "FULL")),
             model_tier=str(data.get("model_tier", "NONE")),
             degraded_mode=bool(data.get("degraded_mode", False)),
