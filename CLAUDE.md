@@ -9,6 +9,28 @@ equities (NSE/BSE). Day, swing and positional. Everything runs locally and free.
 > hard-won gotchas are in [docs/HANDOFF.md](docs/HANDOFF.md). **Read HANDOFF.md before
 > changing infra config** — four separate silent-failure modes are documented there.
 
+## Session hygiene — read narrow, not wide
+
+Every file read stays in context and is re-sent on every later turn, so reading wide
+is what makes a session expensive. In order:
+
+1. **`docs/milestones/INVARIANTS.md`** — rules from every milestone that you must not
+   break, whatever you are building. Always.
+2. **Your milestone slice** — `docs/milestones/M<n>.md` (gate, build list, traps,
+   pointers into PLAN.md), plus the `## Built` rows of the milestones it depends on.
+   Read PLAN.md sections by line range, never whole.
+3. **`docs/CODEMAP.md`** — every public signature. Look symbols up here; open a source
+   file only for what you are about to change. Generated; never hand-edit.
+4. **`<package>/CONTEXT.md`** — tables, guards and known gaps for that package.
+
+**When you finish a component**, in the same commit: add its `## Built` row (files,
+decision and *why*, ADR if irreversible), and move any invariant it now enforces
+from Planned to Active with the test name.
+
+Broad searches ("where is X used", "which modules touch Y") go to a sub-agent, which
+returns the answer instead of the file dumps. One task per session, then `/clear`.
+Don't edit this file or switch model mid-session — either rewrites the prompt cache.
+
 ## Core objective
 
 The system must *measurably* improve from its own results. That is a schema and
