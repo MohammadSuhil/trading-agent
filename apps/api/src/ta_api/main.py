@@ -252,7 +252,7 @@ def context() -> dict:
         )
         row = _rows(br)
         b = row[0] if row else {}
-        regime, note = _regime_from_breadth(b)
+        regime, note = _live_regime(ch, a, d, b)
         return {
             "as_of": d.isoformat(),
             "regime": regime.value, "regime_note": note,
@@ -269,6 +269,31 @@ def context() -> dict:
             },
             "data_quality": "OK" if row else "PARTIAL",
         }
+
+
+def _live_regime(ch, a, d, breadth: dict) -> tuple[Regime, str]:
+    """The regime that GATES trades (breadth) plus the index regime as information.
+
+    ADR-0004 tested the index rules as a gate and rejected them, so gating
+    stays on the breadth heuristic -- the same function the nightly uses. The
+    nightly still records the index regime (md.regime_daily); it is appended
+    to the note, labelled informational, so the dashboard never presents a
+    regime that did not actually gate anything as if it had.
+    """
+    regime, note = _regime_from_breadth(breadth)
+    try:
+        r = _rows(ch.query_pit("md.regime_daily", a, where=f"d <= '{d}' AND model = 'INDEX_RULES_V1'",
+                               order_by="d DESC", limit=1))
+    except Exception:  # noqa: BLE001
+        r = []
+    if r:
+        note = f"{note} · Nifty 500 index rules (informational, not gating): {humanize_regime(r[0]['regime'])}"
+    return regime, note
+
+
+def humanize_regime(v: str) -> str:
+    return {"TREND_UP": "bull", "TREND_DOWN": "bear", "CHOP": "sideways",
+            "HIGH_VOL": "high volatility"}.get(v, v.lower())
 
 
 def _regime_from_breadth(b: dict) -> tuple[Regime, str]:
@@ -897,30 +922,60 @@ def backtest() -> dict:
     a = _now()
     with _ch() as ch:
         try:
+            # FROZEN_CONTROL only, and no row cap: a fallback to "all arms" here
+            # would draw the live paper book as the control (the mirror image of
+            # the I-23 bug), and `ORDER BY d ASC LIMIT 1000` silently cut the
+            # most RECENT sessions off any backtest longer than 1000 days.
             eq_df = ch.query_df(
                 "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
-                "FROM ev.equity_daily WHERE arm = 'FROZEN_CONTROL' ORDER BY d ASC LIMIT 1000"
+                "FROM ev.equity_daily WHERE arm = 'FROZEN_CONTROL' ORDER BY d ASC"
             )
-            if eq_df.is_empty():
-                eq_df = ch.query_df(
-                    "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
-                    "FROM ev.equity_daily ORDER BY d ASC LIMIT 1000"
-                )
             if not eq_df.is_empty():
                 eq_df = eq_df.unique(subset=["d"], keep="last").sort("d")
             eq_rows = _rows(eq_df)
         except Exception:  # noqa: BLE001
             eq_rows = []
 
-        try:
-            bm_df = ch.query_pit(
-                "md.benchmark_1d", a,
-                columns="d, index_id, series_kind, close, ret_1d, tri_source",
-                order_by="d ASC", limit=1000,
-            )
-            bm_rows = _rows(bm_df)
-        except Exception:  # noqa: BLE001
-            bm_rows = []
+        # Benchmark: the published Nifty 500 index over exactly the control's
+        # window. It is the PRICE index (the free daily file has no TRI), so the
+        # rows say so and the UI labels the line "dividends excluded".
+        bm_rows: list[dict] = []
+        cmp: dict | None = None
+        if eq_rows:
+            lo, hi = eq_rows[0]["d"], eq_rows[-1]["d"]
+            try:
+                # ReplacingMergeTree keeps re-ingested days twice until a merge;
+                # dedupe on read (latest knowledge_time wins), never rely on merges.
+                bm_rows = _rows(ch.query_pit(
+                    "md.index_1d", a, columns="d, index_name AS index_id, close, knowledge_time",
+                    where=f"index_name = 'Nifty 500' AND d >= '{lo}' AND d <= '{hi}'", order_by="d ASC",
+                ).sort("knowledge_time").unique(subset=["d"], keep="last").sort("d").drop("knowledge_time"))
+                for r in bm_rows:
+                    r["series_kind"], r["tri_source"] = "PRICE", "PUBLISHED_PRICE"
+            except Exception:  # noqa: BLE001
+                bm_rows = []
+            try:
+                v = ch.query_df(
+                    "SELECT run_ts, start_d, end_d, n_sessions, n_trades, final_equity, total_return, "
+                    "sharpe, max_drawdown, win_rate, curve_d, curve_equity, curve_regime "
+                    "FROM ev.backtest_variants WHERE variant = 'REGIME_FILTER' ORDER BY run_ts DESC LIMIT 1"
+                )
+                if not v.is_empty():
+                    r = v.row(0, named=True)
+                    same = str(r["start_d"]) == str(lo) and str(r["end_d"]) == str(hi)
+                    cmp = {
+                        "variant": "REGIME_FILTER", "same_window": same,
+                        "start_d": str(r["start_d"]), "end_d": str(r["end_d"]),
+                        "n_sessions": r["n_sessions"], "n_trades": r["n_trades"],
+                        "final_equity": r["final_equity"], "total_return_pct": r["total_return"],
+                        "sharpe": r["sharpe"], "max_drawdown": r["max_drawdown"], "win_rate": r["win_rate"],
+                        # Only draw it over the SAME dates; a different window is a
+                        # different experiment and the lines would not be comparable.
+                        "curve": [{"d": str(d_), "equity": e_, "regime": g_} for d_, e_, g_ in
+                                  zip(r["curve_d"], r["curve_equity"], r["curve_regime"], strict=True)] if same else [],
+                    }
+            except Exception:  # noqa: BLE001
+                cmp = None
 
         try:
             from ta_quant.weights import EXPECTED_V1_SHA256, verify_v1_integrity
@@ -939,6 +994,7 @@ def backtest() -> dict:
 
         n_sessions = len(eq_rows)
         needed_sessions = 63
+        control_max_dd = max((float(r.get("drawdown_pct") or 0.0) for r in eq_rows), default=0.0)
         final_equity = float(eq_rows[-1]["equity"]) if eq_rows else 500_000.0
         init_equity = float(eq_rows[0]["equity"]) if eq_rows else 500_000.0
         total_return_pct = round((final_equity - init_equity) / init_equity, 6) if init_equity > 0 else 0.0
@@ -1001,17 +1057,36 @@ def backtest() -> dict:
             "dsr": dsr_val,
             "min_trl": min_trl_val,
             "note": note_val,
+            "max_drawdown": control_max_dd,
             "equity_curve": eq_rows,
             "benchmark_curve": bm_rows,
+            "comparison": cmp,
         }
 
 
 @app.post("/api/backtest/run")
 def run_backtest_api(body: dict | None = None) -> dict:
-    """Trigger a historical backtest execution and persist results."""
+    """Run the control backtest and, unless `compare` is false, the ADR-0004
+    regime-filter variant over the SAME window (report-only, ev.backtest_variants)."""
     from ta_quant.nightly import execute_backtest
     sessions = int((body or {}).get("sessions") or 126)
-    execute_backtest(sessions=sessions, persist_results=True)
+    if not (body or {}).get("compare", True):
+        execute_backtest(sessions=sessions, persist_results=True)
+        return backtest()
+    # The two runs are independent and write DIFFERENT tables (control ->
+    # ev.equity_daily / ev.outcomes / ev.simulation; variant -> only
+    # ev.backtest_variants, I-28), so they run side by side in two processes.
+    # Processes, not threads: the session loop is Python-bound and would
+    # serialise on the GIL. Sessions WITHIN a run cannot be parallelised --
+    # each day's decisions depend on the book the previous day left.
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(max_workers=2, mp_context=mp.get_context("spawn")) as pool:
+        control = pool.submit(execute_backtest, sessions, persist_results=True)
+        variant = pool.submit(execute_backtest, sessions, regime_filter=True)
+        control.result()
+        variant.result()
     return backtest()
 
 
@@ -1028,7 +1103,7 @@ def risk() -> dict:
                 "md.breadth_daily", _now(),
                 where=f"d = '{d}' AND universe = 'NIFTY500'", limit=1,
             ))
-            regime, _ = _regime_from_breadth(b[0] if b else {})
+            regime, _ = _live_regime(ch, _now(), d, b[0] if b else {})
         except Exception:  # noqa: BLE001
             regime = Regime.UNKNOWN
         return {
@@ -1106,44 +1181,110 @@ def trend(symbol: str) -> dict:
 
 
 # --------------------------------------------------- calibration & simulation
+#: Only outcomes of recommendations the system actually made count toward
+#: calibration. FROZEN_CONTROL rows are a backtest of a different rule set;
+#: counting them is how this endpoint once said "OK" with zero bins.
+_CALIBRATION_ARMS = ("DETERMINISTIC", "SHADOW_BUY", "SHADOW_WATCH")
+
+
 @app.get("/api/calibration")
 def calibration() -> dict:
-    """Honest by construction: nothing has resolved yet, so there is nothing
-    to calibrate, and the endpoint says so rather than drawing an empty chart
-    that implies calibration is known and perfect."""
+    """Never "OK" until a calibrator exists (M8) -- a sample count is not calibration.
+
+    It previously returned OK once ANY 30 rows sat in ev.outcomes (backtest
+    included) while sending no bins, BSS or resolution: a sufficiency badge
+    over nothing. Now:
+
+    * n_eff counts per-symbol EPISODES among live + shadow outcomes: windows
+      on the same name that overlap in time merge into one, because a WATCH
+      card repeated five days running is one path through one price move,
+      not five tests. (An earlier `uniqExact(symbol, exit_date)` still
+      counted those repeats whenever they resolved on different days.)
+    * Below 30 -> INSUFFICIENT. At or above 30 -> NOT_BUILT: enough evidence
+      exists, but the isotonic calibrator that would use it is M8 work.
+    """
+    arms = ", ".join(f"'{a}'" for a in _CALIBRATION_ARMS)
     with _ch() as ch:
         try:
-            n = ch.query_df("SELECT count() AS n FROM ev.outcomes")["n"][0]
+            row = ch.query_df(
+                "SELECT count() AS n_raw, countIf(new_episode) AS n_eff, "
+                "uniqExact(symbol) AS n_symbols, uniqExact(exit_date) AS n_exits FROM ("
+                "  SELECT symbol, exit_date, entry_date > max(exit_date) OVER ("
+                "    PARTITION BY symbol ORDER BY entry_date, exit_date "
+                "    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS new_episode"
+                f"  FROM ev.outcomes WHERE arm IN ({arms}) "
+                "  AND knowledge_time <= '2099-01-01 00:00:00')"
+            ).row(0, named=True)
+            n_raw, n_eff = int(row["n_raw"]), int(row["n_eff"])
+            n_symbols, n_exits = int(row["n_symbols"]), int(row["n_exits"])
         except Exception:  # noqa: BLE001
-            n = 0
+            n_raw = n_eff = n_symbols = n_exits = 0
+    needed = 30
+    if n_eff < needed:
+        state = "INSUFFICIENT"
+        note = (f"calibration needs at least {needed} independent resolved cards; have {n_eff} "
+                f"({n_raw} outcomes on {n_symbols} names over {n_exits} exit sessions, overlapping "
+                f"repeats merged). Until then the system cannot say how well its stated "
+                f"probabilities match reality.")
+    else:
+        state = "NOT_BUILT"
+        note = (f"{n_eff} independent resolved cards exist (threshold {needed}; {n_raw} outcomes "
+                f"on {n_symbols} names over only {n_exits} exit sessions, so they share market "
+                f"moves), but no calibrator is built yet: card probabilities are raw volatility-"
+                f"bucket base rates. Isotonic calibration arrives in M8; until then no "
+                f"calibration figure is claimed.")
     return {
-        "state": "OK" if n >= 30 else "INSUFFICIENT",
-        "n_eff": float(n), "needed": 30, "bins": [],
-        "resolution": None, "bss": None,
-        "note": ("calibration needs at least 30 resolved recommendations; "
-                 f"{n} have resolved so far. Until then the system cannot say "
-                 "how well its stated probabilities match reality."),
+        "state": state, "n_eff": float(n_eff), "n_raw": n_raw, "n_symbols": n_symbols,
+        "n_exit_sessions": n_exits, "needed": needed,
+        "bins": [], "resolution": None, "bss": None, "note": note,
     }
 
 
 @app.get("/api/simulation")
 def simulation() -> dict:
+    """The latest backtest's forward Monte Carlo, as the job recorded it.
+
+    It used to count rows across EVERY arm of ev.equity_daily and ev.outcomes
+    (backtest + live + shadow mixed), so its "have N days" was a number of
+    nothing in particular -- and no simulation was ever computed even when the
+    counts passed. Now the backtest job runs the block bootstrap and stores the
+    verdict (ev.simulation); this endpoint is the single SELECT that reads it.
+    """
+    from ta_quant.stats import SIM_MIN_DAYS, SIM_MIN_TRADES
+
+    base = {"needed_days": SIM_MIN_DAYS, "needed_trades": SIM_MIN_TRADES}
     with _ch() as ch:
         try:
-            days = ch.query_df("SELECT count() AS n FROM ev.equity_daily")["n"][0]
-            trades = ch.query_df("SELECT count() AS n FROM ev.outcomes")["n"][0]
+            df = ch.query_df(
+                "SELECT status, start_d, end_d, n_days, n_trades, horizon, block_len, n_paths, "
+                "p_lo, p_hi, p_loss, hist_lo, hist_count FROM ev.simulation "
+                "WHERE arm = 'FROZEN_CONTROL' ORDER BY run_ts DESC LIMIT 1"
+            )
         except Exception:  # noqa: BLE001
-            days, trades = 0, 0
-    enough = days >= 750 and trades >= 200
+            df = pl.DataFrame()
+    if df.is_empty():
+        return {**base, "status": "INSUFFICIENT", "n_days": 0, "n_trades": 0,
+                "p_lo": None, "p_hi": None, "block_len": None, "histogram": [],
+                "note": "no backtest has been run yet; the simulation bootstraps the backtest's "
+                        "realised daily returns. Run `ta backtest --sessions 1500`."}
+    r = df.row(0, named=True)
+    span = f"backtest {r['start_d']} .. {r['end_d']}"
+    if r["status"] != "OK":
+        return {**base, "status": "INSUFFICIENT", "n_days": r["n_days"], "n_trades": r["n_trades"],
+                "p_lo": None, "p_hi": None, "block_len": None, "histogram": [],
+                "note": (f"forward Monte Carlo needs {SIM_MIN_DAYS} sessions and {SIM_MIN_TRADES} "
+                         f"closed trades of backtest; the latest ({span}) has {r['n_days']} and "
+                         f"{r['n_trades']}. A distribution fitted to less is a picture of noise. "
+                         f"Run a longer backtest (e.g. `ta backtest --sessions 1500`).")}
     return {
-        "status": "OK" if enough else "INSUFFICIENT",
-        "n_days": int(days), "n_trades": int(trades),
-        "needed_days": 750, "needed_trades": 200,
-        "p_lo": None, "p_hi": None, "block_len": None,
-        "histogram": [],
-        "note": (f"forward Monte Carlo needs 750 engine-days and 200 closed trades; "
-                 f"have {days} and {trades}. A distribution fitted to this little "
-                 f"history would be a picture of noise."),
+        **base, "status": "OK", "n_days": r["n_days"], "n_trades": r["n_trades"],
+        "p_lo": r["p_lo"], "p_hi": r["p_hi"], "p_loss": r["p_loss"],
+        "block_len": r["block_len"], "horizon": r["horizon"], "n_paths": r["n_paths"],
+        "histogram": [{"bucket": b, "count": c} for b, c in zip(r["hist_lo"], r["hist_count"], strict=True)],
+        "note": (f"{r['n_paths']:,} block-bootstrap paths of {r['horizon']} sessions from the {span} "
+                 f"realised daily returns (FROZEN_CONTROL rules). Interval is the 5th-95th "
+                 f"percentile of one-year return; {r['p_loss']:.0%} of paths lose money. It "
+                 f"assumes the future resembles that history -- it is not a forecast."),
     }
 
 

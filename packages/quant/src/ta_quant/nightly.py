@@ -199,6 +199,52 @@ def current_portfolio(ch: GuardedClient, *, equity: float = 500_000.0) -> Portfo
     )
 
 
+#: ADR-0004: the index regime + REG-01 bear block was tested out of sample
+#: (2021-02 .. 2025-07) and in sample (2025-07 .. 2026-11) and was WORSE in
+#: both (Sharpe 0.04 vs 0.09 OOS; -1.38 vs -0.97 IS). The death-cross BEAR
+#: state fires after the fall, so it blocks recovery entries. So the live arm
+#: keeps the breadth regime for gating; the index regime is computed and
+#: recorded nightly as INFORMATION only. Flip this only with a new ADR and a
+#: rule that beats the control out of sample.
+REG01_ENABLED = False
+
+
+def load_index_regime(ch: GuardedClient, d: date, a: AsOf) -> pl.DataFrame:
+    """Regime series for the live arm, from index bars knowable at `a` (PIT).
+
+    Empty when md.index_1d has no rows yet; `regime_on` then answers UNKNOWN,
+    whose caps are the conservative TREND_DOWN ones -- an unmeasured market is
+    treated as a dangerous one, but REG-01's hard block needs an actual BEAR.
+    """
+    from .regime import REGIME_INDEX, regime_series
+
+    try:
+        idx = ch.query_pit(
+            "md.index_1d", a, columns="d, index_name, open, high, low, close",
+            where=f"index_name = '{REGIME_INDEX}' AND d <= '{d}'", order_by="d",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not load index bars for regime: %s", e)
+        return regime_series(pl.DataFrame())
+    return regime_series(idx) if not idx.is_empty() else regime_series(pl.DataFrame())
+
+
+def _persist_regime(ch: GuardedClient, series: pl.DataFrame, d: date, a: AsOf) -> None:
+    from .regime import REGIME_INDEX
+
+    row = series.filter(pl.col("d") == d)
+    if row.is_empty():
+        return
+    try:
+        ch.insert_df("md.regime_daily", row.select(
+            "d", pl.lit("INDEX_RULES_V1").alias("model"), pl.lit(REGIME_INDEX).alias("index_name"),
+            "regime", "raw_regime", "note", "sma50", "sma200", "vol20", "natr14",
+            pl.lit(a.ts).cast(pl.Datetime("ms", "UTC")).alias("knowledge_time"),
+        ))
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not persist regime: %s", e)
+
+
 def execute_nightly(
     d: date | None = None, *, equity: float = 500_000.0, replay: bool = False
 ) -> RunResult:
@@ -222,6 +268,7 @@ def execute_nightly(
             if 0 < n_sessions < DEFAULT.min_listed_sessions
             else DEFAULT
         )
+        index_regime = load_index_regime(ch, day, a)
         res = run_nightly(
             bars,
             members,
@@ -230,8 +277,11 @@ def execute_nightly(
             cfg=cfg,
             as_of=a.ts,
             surveillance_symbols=surv_syms,
+            index_regime=index_regime if REG01_ENABLED else None,
         )
         persist(ch, res)
+        if not replay:
+            _persist_regime(ch, index_regime, day, a)
         try:
             step_paper_book(ch, res, bars, auto_buy=True)
         except Exception as e:  # noqa: BLE001
@@ -1031,10 +1081,25 @@ def persist(ch: GuardedClient, res: RunResult) -> dict[str, int]:
 
 
 def execute_backtest(
-    sessions: int = 126, *, persist_results: bool = True
+    sessions: int = 126, *, persist_results: bool = True, arm: str = "FROZEN_CONTROL",
+    regime_filter: bool = False,
 ) -> dict[str, Any]:
-    """Execute historical backtest over recent sessions and optionally persist equity curve."""
+    """Execute historical backtest over recent sessions and optionally persist equity curve.
+
+    `arm="FROZEN_CONTROL"` is the day-1 rule set and is what the Honesty view
+    shows. `regime_filter=True` runs the ADR-0004 candidate (index regime +
+    REG-01 bear block) for research; it is report-only, never persisted, so a
+    rejected rule can never overwrite the control's curve. `arm="DETERMINISTIC"`
+    is report-only too: writing it would splice a simulation into the real
+    paper book (I-23).
+    """
     from ta_core.enums import Arm
+
+    arm_obj = Arm(arm)
+    if arm_obj not in (Arm.FROZEN_CONTROL, Arm.DETERMINISTIC):
+        raise ValueError(f"backtest supports FROZEN_CONTROL or DETERMINISTIC, not {arm}")
+    if arm_obj is Arm.DETERMINISTIC or regime_filter:
+        persist_results = False
 
     from .backtest.engine import run_backtest
     from .stats import min_trl
@@ -1051,13 +1116,15 @@ def execute_backtest(
         sorted_dates = sorted(bars["d"].unique().to_list())
         start_date = sorted_dates[-sessions] if len(sorted_dates) > sessions else None
 
+        index_regime = load_index_regime(ch, d, a) if regime_filter else None
         res = run_backtest(
             bars,
             members,
             start_date=start_date,
             end_date=d,
-            arm=Arm.FROZEN_CONTROL,
+            arm=arm_obj if not regime_filter else Arm.DETERMINISTIC,
             warmup_sessions=40,
+            index_regime=index_regime,
         )
 
         if persist_results and res.equity_curve:
@@ -1142,6 +1209,9 @@ def execute_backtest(
                     log.warning("failed to persist backtest outcomes: %s", e)
 
         s = res.stats
+        sim = _persist_simulation(ch, res, a, persist=persist_results)
+        if regime_filter:
+            _persist_variant(ch, res, a, index_regime, variant="REGIME_FILTER")
         m_trl = min_trl(s.sharpe_annualised) if s.sharpe_annualised > 0 else 0.0
         min_trl_val = float(round(m_trl, 1)) if m_trl != float("inf") else 0.0
         return {
@@ -1157,4 +1227,78 @@ def execute_backtest(
             "psr": float(s.psr),
             "dsr": float(s.dsr),
             "min_trl": min_trl_val,
+            "simulation_status": sim.status,
         }
+
+
+def _persist_variant(ch: GuardedClient, res: Any, a: AsOf, regime: pl.DataFrame | None, *, variant: str) -> None:
+    """Record a report-only variant backtest for side-by-side display.
+
+    Goes to ev.backtest_variants -- never ev.equity_daily -- so a rejected
+    rule can be SHOWN next to the control without being able to replace it.
+    Each curve point carries the index regime in force that day, which is
+    what explains where the two lines part.
+    """
+    from .regime import regime_on
+
+    eq = res.equity_curve if isinstance(res.equity_curve, pl.DataFrame) else pl.DataFrame(res.equity_curve)
+    if eq.is_empty():
+        return
+    ds = [x if isinstance(x, date) else datetime.strptime(str(x), "%Y-%m-%d").date() for x in eq["d"].to_list()]
+    regimes = [regime_on(regime, x)[0].value if regime is not None else "UNKNOWN" for x in ds]
+    st = res.stats
+    row = pl.DataFrame([{
+        "run_ts": a.ts, "variant": variant, "start_d": ds[0], "end_d": ds[-1],
+        "n_sessions": len(ds), "n_trades": int(st.n_trades), "final_equity": float(res.final_equity),
+        "total_return": float(st.total_return_pct), "sharpe": float(st.sharpe_annualised),
+        "max_drawdown": float(st.max_drawdown_pct), "win_rate": float(st.hit_rate),
+        "curve_d": ds, "curve_equity": eq["equity"].cast(pl.Float64).to_list(), "curve_regime": regimes,
+    }], schema={
+        "run_ts": pl.Datetime("ms", "UTC"), "variant": pl.Utf8, "start_d": pl.Date, "end_d": pl.Date,
+        "n_sessions": pl.UInt32, "n_trades": pl.UInt32, "final_equity": pl.Float64,
+        "total_return": pl.Float32, "sharpe": pl.Float32, "max_drawdown": pl.Float32, "win_rate": pl.Float32,
+        "curve_d": pl.List(pl.Date), "curve_equity": pl.List(pl.Float64), "curve_regime": pl.List(pl.Utf8),
+    })
+    try:
+        ch.insert_df("ev.backtest_variants", row)
+    except Exception as e:  # noqa: BLE001
+        log.warning("failed to persist %s variant curve: %s", variant, e)
+
+
+def _persist_simulation(ch: GuardedClient, res: Any, a: AsOf, *, persist: bool) -> Any:
+    """Bootstrap the backtest's realised daily returns and record the verdict.
+
+    Runs in the job so the API can stay a single SELECT (I-19). A refusal is
+    written too: the panel must be able to say *how far short* it is.
+    """
+    from .stats import block_bootstrap_forward
+
+    eq = res.equity_curve if isinstance(res.equity_curve, pl.DataFrame) else pl.DataFrame(res.equity_curve)
+    # Start from the initial capital so an N-session backtest yields N daily
+    # returns -- otherwise the first session's P&L is dropped and a run of
+    # exactly SIM_MIN_DAYS sessions is refused as one short.
+    equity = [float(res.initial_equity)] + (eq["equity"].cast(pl.Float64).to_list() if eq.height else [])
+    rets = [equity[i] / equity[i - 1] - 1.0 for i in range(1, len(equity)) if equity[i - 1] > 0]
+    sim = block_bootstrap_forward(rets, n_trades=len(res.outcomes))
+    if not persist:
+        return sim
+    row = pl.DataFrame([{
+        "run_ts": a.ts, "arm": "FROZEN_CONTROL", "status": sim.status,
+        "start_d": res.start_date if isinstance(res.start_date, date) else datetime.strptime(str(res.start_date), "%Y-%m-%d").date(),
+        "end_d": res.end_date if isinstance(res.end_date, date) else datetime.strptime(str(res.end_date), "%Y-%m-%d").date(),
+        "n_days": sim.n_days, "n_trades": sim.n_trades, "horizon": sim.horizon,
+        "block_len": sim.block_len, "n_paths": sim.n_paths, "seed": sim.seed,
+        "p_lo": sim.p_lo, "p_hi": sim.p_hi, "p_loss": sim.p_loss,
+        "hist_lo": [b for b, _ in sim.histogram], "hist_count": [c for _, c in sim.histogram],
+    }], schema={
+        "run_ts": pl.Datetime("ms", "UTC"), "arm": pl.Utf8, "status": pl.Utf8,
+        "start_d": pl.Date, "end_d": pl.Date, "n_days": pl.UInt32, "n_trades": pl.UInt32,
+        "horizon": pl.UInt16, "block_len": pl.UInt16, "n_paths": pl.UInt32, "seed": pl.UInt64,
+        "p_lo": pl.Float32, "p_hi": pl.Float32, "p_loss": pl.Float32,
+        "hist_lo": pl.List(pl.Float32), "hist_count": pl.List(pl.UInt32),
+    })
+    try:
+        ch.insert_df("ev.simulation", row)
+    except Exception as e:  # noqa: BLE001
+        log.warning("failed to persist forward simulation: %s", e)
+    return sim

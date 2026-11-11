@@ -299,8 +299,26 @@ export type Backtest = {
   dsr?: N;
   min_trl?: N;
   note?: S;
+  max_drawdown?: N;
   equity_curve?: List<EquityPoint>;
   benchmark_curve?: List<BenchmarkPoint>;
+  comparison?: BacktestComparison | null;
+};
+
+/** A report-only rule variant backtested over the control's window (ADR-0004). */
+export type BacktestComparison = {
+  variant?: S;
+  same_window?: boolean | null;
+  start_d?: S;
+  end_d?: S;
+  n_sessions?: N;
+  n_trades?: N;
+  final_equity?: N;
+  total_return_pct?: N;
+  sharpe?: N;
+  max_drawdown?: N;
+  win_rate?: N;
+  curve?: List<{ d?: S; equity?: N; regime?: S }>;
 };
 
 export type RuleState = 'OK' | 'WARN' | 'BREACH' | 'DISPLAY_ONLY';
@@ -345,8 +363,9 @@ export type Trend = {
 export type CalibrationBin = { p_stated?: N; p_realised?: N; n?: N };
 
 export type Calibration = {
-  state?: 'INSUFFICIENT' | 'OK' | string | null;
+  state?: 'INSUFFICIENT' | 'NOT_BUILT' | 'OK' | string | null;
   n_eff?: N;
+  n_raw?: N;
   needed?: N;
   bins?: List<CalibrationBin>;
   resolution?: N;

@@ -19,6 +19,7 @@ from ta_core.enums import (
     Arm,
     Horizon,
     ProductType,
+    Regime,
     Sleeve,
     TrendState,
 )
@@ -41,7 +42,8 @@ from ta_ledger.risk import (
     regime_caps,
 )
 
-from ..barriers import build_path_library, estimate_barriers, known_paths
+from ..barriers import BarrierModel, build_path_library, known_paths
+from ..regime import regime_on
 from ..pipeline import (
     _BOOK_LEVEL_RULES,
     K_DN,
@@ -192,8 +194,13 @@ def _screen_session(
     feature_providers: Sequence[FeatureProviderPort] = (),
     edge_estimator: EdgeEstimatorPort | None = None,
     calibrator: ProbabilityCalibratorPort | None = None,
+    index_regime: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
-    """Screen candidates for session d using precomputed factor panel."""
+    """Screen candidates for session d using precomputed factor panel.
+
+    `index_regime` mirrors `pipeline.run_nightly`: index rules + REG-01 bear
+    block, used by `ta backtest --regime-filter` research runs (ADR-0004).
+    """
     trade_syms = set(members.filter(pl.col("index_name") == tradeable_index)["symbol"].to_list())
     configured_score_syms = set(members.filter(pl.col("index_name") == scored_index)["symbol"].to_list())
     score_syms = configured_score_syms or trade_syms
@@ -201,6 +208,9 @@ def _screen_session(
 
     market_breadth = breadth_row(panel, d, market_index, score_syms)
     regime, _ = infer_regime(market_breadth)
+    if index_regime is not None:
+        regime, _ = regime_on(index_regime, d)
+    entries_blocked = index_regime is not None and regime is Regime.TREND_DOWN
     caps = regime_caps(regime)
     new_cap = int(caps["new"])
 
@@ -219,6 +229,7 @@ def _screen_session(
     # d+7, which the live nightly cannot have seen) and to the same fixed
     # window the live pipeline uses -- see `known_paths`.
     lib_today = known_paths(lib, d)
+    bmodel = BarrierModel(lib_today, horizon=Horizon.SWING, k_up=K_UP, k_dn=K_DN)
 
     if ind_tr is None:
         ind_tr = industry_trends(panel, score_syms or trade_syms)
@@ -241,13 +252,7 @@ def _screen_session(
         price, atr = row.get("close"), row.get("atr14")
         if not price or not atr or atr <= 0:
             continue
-        est = estimate_barriers(
-            lib_today,
-            atr_pct=float(atr) / float(price),
-            horizon=Horizon.SWING,
-            k_up=K_UP,
-            k_dn=K_DN,
-        )
+        est = bmodel.estimate(float(atr) / float(price))
         if est.p_up is not None and est.p_dn is not None:
             if edge_estimator is not None or calibrator is not None:
                 edge_adj = float(edge_estimator.estimate_edge(row, est)) if edge_estimator is not None else 0.0
@@ -340,13 +345,7 @@ def _screen_session(
         costs = compute_costs(buy_turnover, decision.qty * float(target), ProductType.DELIVERY)
         cost_bps = costs.bps_of(buy_turnover)
 
-        est = estimate_barriers(
-            lib_today,
-            atr_pct=float(atr) / float(price),
-            horizon=Horizon.SWING,
-            k_up=K_UP,
-            k_dn=K_DN,
-        )
+        est = bmodel.estimate(float(atr) / float(price))
 
         if est.p_up is not None and est.p_dn is not None:
             if edge_estimator is not None or calibrator is not None:
@@ -369,7 +368,7 @@ def _screen_session(
         cost_atr = (cost_bps / 10_000.0) * float(price) / float(atr)
         expectancy = gross_atr - cost_atr if p_up_eff is not None else 0.0
 
-        tradeable = expectancy >= MIN_EXPECTANCY_ATR
+        tradeable = expectancy >= MIN_EXPECTANCY_ATR and not entries_blocked
         if tradeable and new_entries_today >= new_cap:
             tradeable = False
             action = Action.WATCH
@@ -459,6 +458,7 @@ def run_backtest(
     feature_providers: Sequence[FeatureProviderPort] = (),
     edge_estimator: EdgeEstimatorPort | None = None,
     calibrator: ProbabilityCalibratorPort | None = None,
+    index_regime: pl.DataFrame | None = None,
 ) -> BacktestResult:
     """Execute historical backtest over daily bars without lookahead bias.
 
@@ -534,6 +534,8 @@ def run_backtest(
     )
     broker.record_manifest(manifest)
 
+    day_panels = panel.partition_by("d", as_dict=True, maintain_order=True)
+    empty_day = panel.head(0)
     for d in active_sessions:
         session_ts = datetime.combine(d, time(15, 30), tzinfo=UTC)
         bars_today = bars_by_date.get(d, {})
@@ -541,10 +543,14 @@ def run_backtest(
         # Step 1: Morning/Intraday execution on session d
         broker.step_session(d, bars_today, run_id=run_id, ts=session_ts)
 
-        # Step 2: Evening screen after session d close
-        panel_upto_d = panel.filter(pl.col("d") <= d)
+        # Step 2: Evening screen after session d close. With the library and
+        # industry trends precomputed, the screen reads the panel ONLY through
+        # breadth_row and score_universe, and both select `d == session`
+        # first. So it gets that session's rows, partitioned once up front,
+        # instead of re-filtering the whole history every session (was ~40% of
+        # a 1,250-session run). Partitioning keeps row order, so results match.
         recs_df = _screen_session(
-            panel_upto_d,
+            day_panels.get((d,), empty_day),
             members,
             d=d,
             portfolio=broker.portfolio(),
@@ -557,6 +563,7 @@ def run_backtest(
             feature_providers=feature_providers,
             edge_estimator=edge_estimator,
             calibrator=calibrator,
+            index_regime=index_regime,
         )
 
         if not recs_df.is_empty():

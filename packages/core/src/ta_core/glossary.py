@@ -543,6 +543,22 @@ _TERMS: tuple[Term, ...] = (
        "Total Return Index: tracks the Nifty benchmark assuming all company dividends are reinvested.",
        "Comparing against a price-only index is unfair because real stockholders receive dividends. The system measures itself against the tougher total-return yardstick.",
        "audit"),
+    _t("NIFTY500_PRICE", "Nifty 500 index, dividends excluded",
+       "The published Nifty 500 index level, rescaled so it starts at the same rupee value as the backtest. It is the price index, not the total-return one, because the free daily archive file does not publish a total-return series.",
+       "Answers 'did the strategy beat simply holding the market?'. Because dividends (about 1.2% a year) are left out, this line is slightly too easy to beat -- treat a small win over it as a tie.",
+       "audit"),
+    _t("REGIME_FILTER", "Tested market filter (rejected)",
+       "The same frozen rules over the same dates, but with one extra rule: no new buys while the Nifty 500 index is in a bear market (below its 200-day average, with its 50-day average also below the 200-day).",
+       "Shows directly what the filter would have done. Tested on 2021-2025 data before adoption, it did worse than the plain rules, because that bear signal only switches on after a fall -- so it blocks buying in the recovery.",
+       "audit"),
+    _t("REG-01", "No new buys in a bear market",
+       "A rule that blocks every new purchase while the Nifty 500 index is in a bear market. Existing positions still exit normally.",
+       "Currently switched off: the evidence showed it costs more than it saves. It is kept only so the comparison line can be drawn.",
+       "risk"),
+    _t("INDEX_REGIME", "Market state from the Nifty 500 index",
+       "Bull, bear, high-volatility or sideways, decided each evening from the Nifty 500's 50- and 200-day averages and its recent volatility. A calmer state is only accepted after it has held for three sessions.",
+       "Shown for information on the dashboard and in the chart tooltip. It does not decide trades: the breadth-based market state does.",
+       "regime"),
 )
 
 GLOSSARY: dict[str, Term] = {t.term: t for t in _TERMS}

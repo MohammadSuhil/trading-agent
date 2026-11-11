@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { postJson, useApi } from '../api/client';
-import type { Backtest, Calibration, CalibrationBin, Simulation } from '../api/types';
+import type { Backtest, Calibration, CalibrationBin, N, Simulation } from '../api/types';
 import { ApiGate } from '../components/ApiGate';
 import { DataTable, type Column } from '../components/DataTable';
 import { SufficiencyChip } from '../components/StateChip';
@@ -95,7 +95,11 @@ function CalibrationPanel({ data, mode }: { data: Calibration | null; mode: Mode
     >
       {insufficient ? (
         <Refusal
-          heading="Calibration is not established. No calibration figure is being claimed."
+          heading={
+            data?.state === 'NOT_BUILT'
+              ? 'Calibrator not built yet (M8). No calibration figure is being claimed.'
+              : 'Calibration is not established. No calibration figure is being claimed.'
+          }
           have={data?.n_eff}
           need={data?.needed}
           unit="effective observations (n_eff)"
@@ -225,6 +229,7 @@ function SystemIntegrityPanel({
   onRefresh?: () => void;
 }) {
   const [sessions, setSessions] = useState<number>(126);
+  const [compare, setCompare] = useState<boolean>(true);
   const [running, setRunning] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
 
@@ -232,7 +237,7 @@ function SystemIntegrityPanel({
     setRunning(true);
     setRunError(null);
     try {
-      await postJson('/api/backtest/run', { sessions });
+      await postJson('/api/backtest/run', { sessions, compare });
       onRefresh?.();
     } catch (err) {
       setRunError(err instanceof Error ? err.message : String(err));
@@ -302,7 +307,21 @@ function SystemIntegrityPanel({
                 <option value={63}>63 sessions (~3M)</option>
                 <option value={126}>126 sessions (~6M)</option>
                 <option value={252}>252 sessions (~1Y)</option>
+                {/* 750 is the forward simulation's refusal threshold (PLAN honesty rules) */}
+                <option value={750}>750 sessions (~3Y, enables simulation)</option>
+                <option value={1250}>1250 sessions (~5Y)</option>
               </select>
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-ink">
+              <input
+                type="checkbox"
+                checked={compare}
+                disabled={running}
+                onChange={(e) => setCompare(e.target.checked)}
+              />
+              <Term code="REGIME_FILTER">
+                <span>Also run the regime-filter comparison (~2× time)</span>
+              </Term>
             </label>
             <button
               type="button"
@@ -310,7 +329,9 @@ function SystemIntegrityPanel({
               onClick={handleRunBacktest}
               className="rounded-lg border border-accent bg-accent/10 px-3 py-1.5 text-xs font-semibold text-accent-ink hover:bg-accent/20 disabled:opacity-50"
             >
-              {running ? 'Running backtest…' : 'Run historical backtest'}
+              {running
+                ? `Running backtest${compare ? 's' : ''}… (a few minutes for long windows)`
+                : 'Run historical backtest'}
             </button>
           </div>
           {runError && (
@@ -392,18 +413,123 @@ function SystemIntegrityPanel({
               </div>
 
               <div className="mt-4">
-                <div className="label mb-2">Control Arm Equity Curve</div>
+                <div className="label mb-2">Control arm vs regime filter vs market</div>
                 <EquityCurve
                   equityCurve={data?.equity_curve ?? []}
                   benchmarkCurve={data?.benchmark_curve ?? []}
+                  comparisonCurve={data?.comparison?.curve ?? []}
+                  labels={{
+                    primary: 'Frozen control',
+                    comparison: 'Regime filter (rejected)',
+                    benchmark: 'Nifty 500 index (price, rebased)',
+                  }}
                   mode={mode}
                 />
+                <ComparisonNotes data={data} />
               </div>
             </div>
           )}
         </div>
       </div>
     </Panel>
+  );
+}
+
+/**
+ * What each line is, how far to trust it, and the numbers side by side.
+ *
+ * Every figure here is sent by the API (the UI computes nothing); the only
+ * logic is choosing which explanation applies -- e.g. saying the comparison
+ * is stale rather than drawing a line from a different window.
+ */
+function ComparisonNotes({ data }: { data: Backtest | null }) {
+  const c = data?.comparison;
+  const bench = data?.benchmark_curve ?? [];
+  const sameWindow = Boolean(c?.same_window && (c?.curve?.length ?? 0) >= 2);
+  const rows: Array<{
+    key: string; swatch: ReactNode; label: ReactNode; ret: N; equity: N; trades: N; sharpe: N; dd: N; win: N;
+  }> = [
+    {
+      key: 'control',
+      swatch: <span className="inline-block h-0.5 w-4 rounded bg-s1" />,
+      label: <Term code="FROZEN_CONTROL"><span>Frozen control</span></Term>,
+      ret: data?.total_return_pct ?? null, equity: data?.final_equity ?? null, trades: data?.n_trades ?? null,
+      sharpe: data?.sharpe ?? null, dd: data?.max_drawdown ?? null, win: data?.win_rate ?? null,
+    },
+  ];
+  if (sameWindow && c) {
+    rows.push({
+      key: 'variant',
+      swatch: <span className="inline-block w-4 border-b-2 border-dashed border-warning" />,
+      label: <Term code="REGIME_FILTER"><span>Regime filter (rejected)</span></Term>,
+      ret: c.total_return_pct ?? null, equity: c.final_equity ?? null, trades: c.n_trades ?? null,
+      sharpe: c.sharpe ?? null, dd: c.max_drawdown ?? null, win: c.win_rate ?? null,
+    });
+  }
+  return (
+    <div className="mt-4 space-y-3 text-xs">
+      <div className="overflow-x-auto rounded-lg border border-line">
+        <table className="w-full text-left">
+          <thead className="bg-sunken text-[11px] uppercase tracking-wide text-muted">
+            <tr>
+              <th className="px-3 py-2">Line</th>
+              <th className="px-3 py-2 text-right">Return</th>
+              <th className="px-3 py-2 text-right">Final equity</th>
+              <th className="px-3 py-2 text-right">Trades</th>
+              <th className="px-3 py-2 text-right">Sharpe</th>
+              <th className="px-3 py-2 text-right">Max drawdown</th>
+              <th className="px-3 py-2 text-right">Win rate</th>
+            </tr>
+          </thead>
+          <tbody className="tnum">
+            {rows.map((r) => (
+              <tr key={r.key} className="border-t border-line">
+                <td className="px-3 py-2"><span className="flex items-center gap-2">{r.swatch}{r.label}</span></td>
+                <td className="px-3 py-2 text-right">{signedPctFrac(r.ret, 2)}</td>
+                <td className="px-3 py-2 text-right">{inr(r.equity)}</td>
+                <td className="px-3 py-2 text-right">{count(r.trades)}</td>
+                <td className="px-3 py-2 text-right">{num(r.sharpe, 2)}</td>
+                <td className="px-3 py-2 text-right">{isNum(r.dd) ? `−${pctFrac(Math.abs(r.dd), 1)}` : '—'}</td>
+                <td className="px-3 py-2 text-right">{pctFrac(r.win, 1)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <ul className="space-y-1.5 text-ink2">
+        <li>
+          <b className="text-ink">Frozen control</b> <TermInfo code="FROZEN_CONTROL" className="ml-0.5 align-middle" /> —
+          the day-1 rules, locked forever. Every change must beat this line to count.
+        </li>
+        <li>
+          <b className="text-ink">Regime filter (rejected)</b> <TermInfo code="REGIME_FILTER" className="ml-0.5 align-middle" /> —
+          the same rules plus <Term code="REG-01"><span>REG-01</span></Term>: no new buys while the{' '}
+          <Term code="INDEX_REGIME"><span>index regime</span></Term> is bear. Hover the chart to see the regime each day.
+          It is <b>switched off</b> in live trading: tested on 2021–2025 data first, it did worse, because its bear
+          signal only turns on after a fall and so blocks buying in the recovery (ADR-0004).
+          {!sameWindow && (
+            <span className="text-warning-ink">
+              {' '}
+              {c
+                ? `Not drawn: the last comparison covered ${c.start_d} → ${c.end_d}, a different window. Re-run with the box ticked.`
+                : 'Not drawn yet: tick the box above and run the backtest.'}
+            </span>
+          )}
+        </li>
+        <li>
+          <b className="text-ink">Nifty 500 index</b> <TermInfo code="NIFTY500_PRICE" className="ml-0.5 align-middle" /> —
+          the market itself, rescaled to start at the same ₹ value. It excludes dividends (≈1.2%/yr), so a small
+          margin over it is a tie, not a win.
+          {bench.length < 2 && <span className="text-warning-ink"> Not drawn: no index data for this window.</span>}
+        </li>
+        <li className="text-muted">
+          All three share the same dates, costs and starting capital. The universe is today&apos;s Nifty 500 applied to
+          the past (survivorship), which flatters the strategy lines equally — fine for comparing them, not for
+          absolute returns.
+        </li>
+      </ul>
+    </div>
   );
 }
 

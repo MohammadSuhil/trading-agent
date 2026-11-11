@@ -3,7 +3,7 @@ import type { BenchmarkPoint, EquityPoint } from '../api/types';
 import { useMeasure } from '../lib/useMeasure';
 import { tokens, type Mode } from '../lib/theme';
 import { Empty } from '../components/primitives';
-import { inr, isNum, pctFrac, signedPctFrac, stamp } from '../lib/format';
+import { inr, isNum, pctFrac, stamp } from '../lib/format';
 
 const HEIGHT = 320;
 const M = { top: 28, right: 20, bottom: 36, left: 68 };
@@ -18,23 +18,44 @@ type Point = {
   py: number;
   benchVal?: number;
   benchPy?: number;
+  cmpVal?: number;
+  cmpPy?: number;
+  regime?: string;
+};
+
+export type ComparisonPoint = { d?: string | null; equity?: number | null; regime?: string | null };
+
+const REGIME_WORD: Record<string, string> = {
+  TREND_UP: 'bull', TREND_DOWN: 'bear', CHOP: 'sideways', HIGH_VOL: 'high volatility', UNKNOWN: 'not yet measurable',
 };
 
 /**
- * Equity curve vs benchmark chart.
+ * Equity curve vs benchmark chart, with an optional comparison strategy.
  *
- * Renders account value alongside the rebased Nifty Total Return Index.
+ * Renders account value alongside a benchmark rebased to the same starting
+ * rupee value, and -- when `comparisonCurve` is given -- a second strategy
+ * over the same dates (e.g. the ADR-0004 regime-filter variant). Values are
+ * matched by DATE, never by position, so a missing day cannot shift a line.
  * Requires at least 2 recorded sessions; otherwise displays an honest refusal.
  */
 export function EquityCurve({
   equityCurve,
   benchmarkCurve,
+  comparisonCurve,
+  labels,
   mode,
 }: {
   equityCurve: EquityPoint[];
   benchmarkCurve: BenchmarkPoint[];
+  comparisonCurve?: ComparisonPoint[];
+  labels?: { primary?: string; comparison?: string; benchmark?: string };
   mode: Mode;
 }) {
+  const L = {
+    primary: labels?.primary ?? 'Equity',
+    comparison: labels?.comparison ?? 'Comparison',
+    benchmark: labels?.benchmark ?? 'Benchmark (rebased to start)',
+  };
   const [ref, { width }] = useMeasure<HTMLDivElement>();
   const [hover, setHover] = useState<Point | null>(null);
   const t = tokens(mode);
@@ -64,6 +85,13 @@ export function EquityCurve({
     }
   });
 
+  const cmpByDate = new Map<string, { equity: number; regime?: string }>();
+  (comparisonCurve ?? []).forEach((c) => {
+    if (typeof c.d === 'string' && isNum(c.equity)) {
+      cmpByDate.set(c.d, { equity: c.equity, regime: typeof c.regime === 'string' ? c.regime : undefined });
+    }
+  });
+
   const e0 = first.equity;
   const b0 = benchByDate.get(first.d);
   const canRebaseBench = isNum(b0) && b0 > 0;
@@ -71,6 +99,8 @@ export function EquityCurve({
   // Collect values to determine Y scale
   const allValues = validEquity.map((p) => p.equity);
   validEquity.forEach((p) => {
+    const c = cmpByDate.get(p.d);
+    if (c) allValues.push(c.equity);
     if (canRebaseBench) {
       const bc = benchByDate.get(p.d);
       if (isNum(bc)) {
@@ -106,6 +136,12 @@ export function EquityCurve({
         pt.benchPy = sy(val);
       }
     }
+    const c = cmpByDate.get(p.d);
+    if (c) {
+      pt.cmpVal = c.equity;
+      pt.cmpPy = sy(c.equity);
+      pt.regime = c.regime;
+    }
     return pt;
   });
 
@@ -116,6 +152,15 @@ export function EquityCurve({
     benchPoints.length >= 2
       ? benchPoints.map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.px} ${p.benchPy}`).join(' ')
       : null;
+
+  const cmpPoints = points.filter((p): p is Point & { cmpVal: number; cmpPy: number } => p.cmpVal !== undefined);
+  const cmpPath =
+    cmpPoints.length >= 2
+      ? cmpPoints.map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.px} ${p.cmpPy}`).join(' ')
+      : null;
+
+  // Hover column width: one session's horizontal slot (at least 1px).
+  const colW = Math.max(1, w / Math.max(1, points.length - 1));
 
   // 4 Y ticks
   const yTicks = [0, 0.33, 0.66, 1].map((pct) => y0 + pct * (y1 - y0));
@@ -130,15 +175,24 @@ export function EquityCurve({
           <div className="absolute right-4 top-1 z-10 flex flex-wrap items-center gap-4 text-[11px] text-muted">
             <span className="flex items-center gap-1.5">
               <span className="inline-block h-0.5 w-3 rounded" style={{ backgroundColor: t.series1 }} />
-              <span className="text-ink">Equity</span>
+              <span className="text-ink">{L.primary}</span>
             </span>
-            {benchPath && (
+            {cmpPath && (
               <span className="flex items-center gap-1.5">
                 <span
                   className="inline-block h-0 w-3 border-b border-dashed"
-                  style={{ borderColor: t.muted, borderWidth: '1.5px' }}
+                  style={{ borderColor: t.warning, borderWidth: '2px' }}
                 />
-                <span>Benchmark (rebased to start)</span>
+                <span className="text-ink">{L.comparison}</span>
+              </span>
+            )}
+            {benchPath && (
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="inline-block h-0 w-3 border-b border-dotted"
+                  style={{ borderColor: t.muted, borderWidth: '2px' }}
+                />
+                <span>{L.benchmark}</span>
               </span>
             )}
           </div>
@@ -186,15 +240,21 @@ export function EquityCurve({
             <line x1={M.left} x2={M.left + w} y1={M.top + h} y2={M.top + h} stroke={t.axis} strokeWidth={1} />
             <line x1={M.left} x2={M.left} y1={M.top} y2={M.top + h} stroke={t.axis} strokeWidth={1} />
 
-            {/* Benchmark line (dashed) */}
+            {/* Benchmark line (dotted) */}
             {benchPath && (
               <path
                 d={benchPath}
                 fill="none"
                 stroke={t.muted}
                 strokeWidth={1.5}
-                strokeDasharray="4 4"
+                strokeDasharray="1.5 3"
+                strokeLinecap="round"
               />
+            )}
+
+            {/* Comparison strategy (dashed) */}
+            {cmpPath && (
+              <path d={cmpPath} fill="none" stroke={t.warning} strokeWidth={1.75} strokeDasharray="6 4" />
             )}
 
             {/* Equity line (solid) */}
@@ -224,17 +284,30 @@ export function EquityCurve({
                 key={`pt-${idx}`}
                 tabIndex={0}
                 role="img"
-                aria-label={`${stamp(p.d)}: equity ${inr(p.equity)}`}
+                aria-label={`${stamp(p.d)}: ${L.primary} ${inr(p.equity)}${
+                  p.cmpVal !== undefined ? `, ${L.comparison} ${inr(p.cmpVal)}` : ''
+                }`}
                 onPointerEnter={() => setHover(p)}
                 onPointerLeave={() => setHover(null)}
                 onFocus={() => setHover(p)}
                 onBlur={() => setHover(null)}
               >
-                <circle cx={p.px} cy={p.py} r={Math.max(10, w / points.length / 2)} fill="transparent" />
+                {/* Full-height column per session: with several lines, a hit
+                    circle on the primary line alone made the others un-hoverable. */}
+                <rect
+                  x={p.px - colW / 2}
+                  y={M.top}
+                  width={colW}
+                  height={h}
+                  fill="transparent"
+                />
                 {hover?.i === p.i && (
                   <>
                     {p.benchPy !== undefined && (
                       <circle cx={p.px} cy={p.benchPy} r={4} fill={t.muted} stroke={t.surface} strokeWidth={1.5} />
+                    )}
+                    {p.cmpPy !== undefined && (
+                      <circle cx={p.px} cy={p.cmpPy} r={4} fill={t.warning} stroke={t.surface} strokeWidth={1.5} />
                     )}
                     <circle cx={p.px} cy={p.py} r={5} fill={t.series1} stroke={t.surface} strokeWidth={2} />
                   </>
@@ -247,17 +320,19 @@ export function EquityCurve({
             <div
               className="pointer-events-none absolute z-20 rounded-lg border border-line-strong bg-raised p-2.5 text-xs shadow-pop"
               style={{
-                left: Math.min(hover.px + 14, Math.max(10, width - 210)),
+                left: Math.min(hover.px + 14, Math.max(10, width - 250)),
                 top: Math.max(10, hover.py - 20),
               }}
             >
               <div className="font-mono text-[11px] font-semibold text-ink">{stamp(hover.d)}</div>
               <div className="tnum mt-1 text-[13px] font-semibold text-ink">
-                Equity: {inr(hover.equity)}
+                {L.primary}: {inr(hover.equity)}
               </div>
               {isNum(hover.drawdown_pct) && (
                 <div className="tnum text-ink2">
-                  Drawdown: {signedPctFrac(hover.drawdown_pct)}
+                  {/* stored as a positive fraction below the high-water mark; a
+                      "+" read as a gain, so it is always shown as a loss */}
+                  Drawdown: {hover.drawdown_pct === 0 ? pctFrac(0) : `−${pctFrac(Math.abs(hover.drawdown_pct))}`}
                 </div>
               )}
               {isNum(hover.heat_pct) && (
@@ -265,9 +340,26 @@ export function EquityCurve({
                   Heat: {pctFrac(hover.heat_pct)}
                 </div>
               )}
+              {hover.cmpVal !== undefined && (
+                <div className="tnum mt-1 border-t border-line pt-1">
+                  <div className="font-semibold" style={{ color: t.warning }}>
+                    {L.comparison}: {inr(hover.cmpVal)}
+                  </div>
+                  <div className="text-ink2">
+                    vs {L.primary.toLowerCase()}: {hover.cmpVal - hover.equity >= 0 ? '+' : '−'}
+                    {inr(Math.abs(hover.cmpVal - hover.equity))}
+                  </div>
+                  {hover.regime && (
+                    <div className="text-[11px] text-muted">
+                      Index regime: {REGIME_WORD[hover.regime] ?? hover.regime.toLowerCase()}
+                      {hover.regime === 'TREND_DOWN' ? ' — new buys blocked on this line' : ''}
+                    </div>
+                  )}
+                </div>
+              )}
               {hover.benchVal !== undefined && (
                 <div className="tnum mt-1 border-t border-line pt-1 text-[11px] text-muted">
-                  Benchmark (rebased): {inr(hover.benchVal)}
+                  {L.benchmark}: {inr(hover.benchVal)}
                 </div>
               )}
             </div>

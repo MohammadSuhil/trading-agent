@@ -42,7 +42,7 @@ def cmd_ingest(a: argparse.Namespace) -> int:
     start = _d(a.start) if a.start else end - timedelta(days=a.days)
     print(f"ingesting NSE sessions {start} .. {end}")
     s = ingest_sessions(start, end)
-    print(f"  weekdays probed : {s['requested']}")
+    print(f"  days probed     : {s['requested']}")
     print(f"  sessions stored : {s['sessions']}")
     print(f"  holidays (404)  : {s['holidays']}")
     print(f"  failures        : {s['failed']}")
@@ -141,6 +141,17 @@ def cmd_daily(a: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_index_history(a: argparse.Namespace) -> int:
+    """Backfill md.index_1d only -- for regime checks on pre-bhavcopy history."""
+    from ta_datafeed.backfill import ingest_index_history
+    end = _d(a.end) if a.end else date.today()
+    start = _d(a.start)
+    print(f"ingesting NSE index close files {start} .. {end}")
+    s = ingest_index_history(start, end)
+    print(f"  sessions={s['sessions']} rows={s['rows']:,} holidays={s['holidays']} failed={s['failed']}")
+    return 1 if s["sessions"] == 0 else 0
+
+
 def cmd_constituents(a: argparse.Namespace) -> int:
     from ta_datafeed.backfill import refresh_constituents
     s = refresh_constituents(tuple(a.indices))
@@ -211,11 +222,14 @@ def cmd_backtest(a: argparse.Namespace) -> int:
     from ta_quant.nightly import execute_backtest
 
     sessions = getattr(a, "sessions", 126) or 126
-    print(f"Running historical backtest over {sessions} sessions...")
-    res = execute_backtest(sessions=sessions, persist_results=True)
+    arm = (getattr(a, "arm", None) or "FROZEN_CONTROL").upper()
+    print(f"Running historical backtest over {sessions} sessions ({arm})...")
+    rf = bool(getattr(a, "regime_filter", False))
+    res = execute_backtest(sessions=sessions, persist_results=True, arm=arm, regime_filter=rf)
 
+    label = "INDEX REGIME + REG-01 (ADR-0004 candidate, rejected)" if rf else arm
     print("=" * 60)
-    print("BACKTEST RESULTS: FROZEN_CONTROL")
+    print(f"BACKTEST RESULTS: {label}" + ("  (report-only, not persisted)" if rf or arm != "FROZEN_CONTROL" else ""))
     print(f"  Period               : {res['start_date']} .. {res['end_date']}")
     print(f"  Sessions             : {res['n_sessions']}")
     print(f"  Initial Equity       : Rs {res['initial_equity']:,.2f}")
@@ -227,6 +241,7 @@ def cmd_backtest(a: argparse.Namespace) -> int:
     print(f"  PSR (Prob Sharpe)    : {res['psr']:.2%}")
     print(f"  DSR (Deflated Sharpe): {res['dsr']:.2%}")
     print(f"  Min TRL              : {res['min_trl']}")
+    print(f"  Forward simulation   : {res.get('simulation_status', '-')}")
     print("=" * 60)
     return 0
 
@@ -278,8 +293,14 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--start", help="start date YYYY-MM-DD")
     c.add_argument("--end", help="end date YYYY-MM-DD")
     c.add_argument("--arm", default="FROZEN_CONTROL", help="arm to simulate (FROZEN_CONTROL, DETERMINISTIC)")
+    c.add_argument("--regime-filter", action="store_true",
+                   help="research: apply the index regime + REG-01 bear block (ADR-0004; report-only)")
     c.add_argument("--trials", type=int, default=1, help="number of trials for deflated Sharpe")
     c.set_defaults(fn=cmd_backtest)
+
+    c = sub.add_parser("index-history", help="backfill NSE index OHLC (md.index_1d) only")
+    c.add_argument("--start", required=True); c.add_argument("--end")
+    c.set_defaults(fn=cmd_index_history)
 
     c = sub.add_parser("constituents", help="snapshot index membership + industries")
     c.add_argument("--indices", nargs="+",

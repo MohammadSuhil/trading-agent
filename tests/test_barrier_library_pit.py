@@ -85,3 +85,33 @@ def test_live_and_backtest_share_one_cut() -> None:
         bt = known_paths(full, session, window=30)
         key = ["symbol", "d"]
         assert bt.select(key).sort(key).equals(live.select(key).sort(key)), session
+
+
+def test_barrier_model_computes_each_cell_once(monkeypatch) -> None:
+    """Perf guard: per-candidate recomputation was 92% of backtest time.
+
+    A session's candidates share one library, so whatever the number of
+    candidates, at most 4 cells (3 terciles + unconditioned) may be computed --
+    and the cached answer must equal a fresh computation.
+    """
+    import random
+
+    from ta_quant.barriers import BarrierModel
+
+    panel = _panel(n=120)
+    lib = build_path_library(panel, horizon=Horizon.SWING)
+    calls = {"n": 0}
+    orig = BarrierModel._wsum
+
+    def counting(frame, oc):
+        calls["n"] += 1
+        return orig(frame, oc)
+
+    monkeypatch.setattr(BarrierModel, "_wsum", staticmethod(counting))
+    m = BarrierModel(lib)
+    after_init = calls["n"]
+    rng = random.Random(3)
+    xs = [rng.uniform(0.0, 0.05) for _ in range(500)] + [None]
+    ests = [m.estimate(x) for x in xs]
+    assert calls["n"] - after_init <= 4 * 3          # <= 4 cells x 3 outcome classes
+    assert all(BarrierModel(lib).estimate(x) == e for x, e in zip(xs[:20], ests[:20], strict=True))

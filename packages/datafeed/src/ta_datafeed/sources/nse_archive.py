@@ -20,7 +20,15 @@ from ta_core.timefmt import IST
 
 from ..http import PoliteClient
 from ..parse.constituents import constituents_url, parse_constituents
-from ..parse.udiff import bhavcopy_url, parse_udiff_bhavcopy
+from ..parse.index_close import index_close_url, parse_index_close
+from ..parse.udiff import (
+    LEGACY_BEFORE,
+    BhavcopyFormatError,
+    bhavcopy_url,
+    legacy_bhavcopy_url,
+    parse_legacy_bhavcopy,
+    parse_udiff_bhavcopy,
+)
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +45,21 @@ class SessionResult:
     was_session: bool
 
 
+def _same_session(bars: pl.DataFrame, d: date) -> pl.DataFrame:
+    """Every row of the file for session `d` must be dated `d`.
+
+    A date-format change (NSE moved the legacy file from "2020" to "20" mid-
+    2020, which parsed as year 20 AD) or a mis-served file would otherwise land
+    bars on the wrong session -- or crash the insert halfway through a backfill.
+    """
+    bad = bars.filter(pl.col("d") != d)
+    if bad.height:
+        raise BhavcopyFormatError(
+            f"file for {d} contains {bad.height} row(s) dated {bad['d'].unique().to_list()[:3]}"
+        )
+    return bars
+
+
 class NSEArchiveSource:
     def __init__(self, client: PoliteClient) -> None:
         self.client = client
@@ -50,15 +73,40 @@ class NSEArchiveSource:
         the most reliable trading-calendar source available, because it is the
         exchange's own output.
         """
+        kt = datetime.combine(d, BHAVCOPY_PUBLISH_IST, tzinfo=IST).astimezone(UTC)
+        if d < LEGACY_BEFORE:
+            # Before July 2024 the session lives in the legacy file. Asking it
+            # first saves a guaranteed-404 UDiFF probe per historical day; the
+            # two formats were verified field-identical where both exist.
+            legacy = self.client.get_bytes(
+                legacy_bhavcopy_url(d), subdir=f"nse_bhavcopy_legacy/{d:%Y/%m}", allow_404=True
+            )
+            if legacy is not None:
+                return SessionResult(d, _same_session(parse_legacy_bhavcopy(legacy, knowledge_time=kt), d),
+                                     was_session=True)
         blob = self.client.get_bytes(
             bhavcopy_url(d), subdir=f"nse_bhavcopy/{d:%Y/%m}", allow_404=True
         )
         if blob is None:
             return SessionResult(d, None, was_session=False)
-
-        kt = datetime.combine(d, BHAVCOPY_PUBLISH_IST, tzinfo=IST).astimezone(UTC)
-        bars = parse_udiff_bhavcopy(blob, knowledge_time=kt)
+        bars = _same_session(parse_udiff_bhavcopy(blob, knowledge_time=kt), d)
         return SessionResult(d, bars, was_session=True)
+
+    # ------------------------------------------------------------ indices
+    def fetch_index_close(self, d: date) -> pl.DataFrame | None:
+        """OHLC for every NSE index on session `d`; None if NSE published none.
+
+        Stamped with the same 18:30 IST knowledge_time as the bhavcopy: the
+        file is an end-of-day publication, so a same-day 15:00 decision must
+        not see it.
+        """
+        blob = self.client.get_bytes(
+            index_close_url(d), subdir=f"nse_index_close/{d:%Y/%m}", allow_404=True
+        )
+        if blob is None:
+            return None
+        kt = datetime.combine(d, BHAVCOPY_PUBLISH_IST, tzinfo=IST).astimezone(UTC)
+        return parse_index_close(blob, knowledge_time=kt, session=d)
 
     def fetch_range(self, start: date, end: date) -> list[SessionResult]:
         out: list[SessionResult] = []

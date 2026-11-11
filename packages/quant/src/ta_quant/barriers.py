@@ -264,64 +264,107 @@ def estimate_barriers(
     >>> e.reason
     'library too small: n_eff 0.2 of 200 required for swing'
     """
-    if lib.height == 0:
-        return _unavailable("no resolved paths in the library", 0.0,
-                            horizon=horizon, k_up=k_up, k_dn=k_dn)
+    return BarrierModel(lib, horizon=horizon, k_up=k_up, k_dn=k_dn).estimate(atr_pct)
 
-    lib = _vol_tercile(lib)
-    pooled = lib
 
-    cell = lib
-    if atr_pct is not None:
-        qs = lib["atr_pct"].quantile(1 / 3), lib["atr_pct"].quantile(2 / 3)
-        t = 0 if atr_pct <= (qs[0] or 0.0) else (1 if atr_pct <= (qs[1] or 0.0) else 2)
-        cell = lib.filter(pl.col("vol_tercile") == t)
-        if cell.height == 0:
-            cell = lib
+class BarrierModel:
+    """`estimate_barriers` for one library, computed once per cell.
 
-    # Kish effective sample size accounting for overlap concurrency (w ~ 1/h).
-    # Raw row counts are deliberately never used.
-    h = HORIZON_SESSIONS[horizon]
-    w = cell["w"]
-    sw, sw2 = float(w.sum()), float((w**2).sum())
-    n_eff = (sw * sw) / (h * sw2) if (sw2 > 0 and h > 0) else 0.0
+    Within a session every candidate is estimated against the SAME library;
+    the only input that varies is `atr_pct`, and it matters only through the
+    volatility tercile it falls in. So there are at most four distinct answers
+    (three terciles + unconditioned) -- yet the per-candidate call recomputed
+    two quantiles and six filtered sums over ~100k rows for each of ~90
+    candidates. Profiled at 92% of backtest time (45 of 49 s for 126
+    sessions). Build one model per session and call `estimate()` per candidate.
 
-    if n_eff < MIN_N_EFF:
-        return _unavailable(
-            f"library too small: n_eff {n_eff:.1f} of {MIN_N_EFF:.0f} required "
-            f"for {horizon.value.lower()}",
-            n_eff, horizon=horizon, k_up=k_up, k_dn=k_dn,
-        )
+    The arithmetic is unchanged -- same filters, same sums, same order -- so
+    results are bit-identical to the old per-call path (tested), which the
+    backtest == paper invariant depends on.
 
-    # Weighted counts in the cell, shrunk toward the pooled base rate.
-    def wsum(frame: pl.DataFrame, oc: str) -> float:
+    >>> import polars as pl
+    >>> lib = pl.DataFrame({"outcome": ["UP", "DOWN", "VERTICAL"] * 400,
+    ...                     "w": [0.1] * 1200, "atr_pct": [0.01, 0.02, 0.03] * 400})
+    >>> m = BarrierModel(lib)
+    >>> m.estimate(0.015) is m.estimate(0.016)     # same tercile -> same cached object
+    True
+    """
+
+    def __init__(self, lib: pl.DataFrame, *, horizon: Horizon = Horizon.SWING,
+                 k_up: float = 2.0, k_dn: float = 1.0) -> None:
+        self.horizon, self.k_up, self.k_dn = horizon, k_up, k_dn
+        self._cache: dict[int | None, BarrierEstimate] = {}
+        self._lib = _vol_tercile(lib) if lib.height else lib
+        if lib.height:
+            qs = self._lib["atr_pct"].quantile(1 / 3), self._lib["atr_pct"].quantile(2 / 3)
+            self._q = ((qs[0] or 0.0), (qs[1] or 0.0))
+            pooled_tot = float(self._lib["w"].sum()) or 1.0
+            self._prior = [self._wsum(self._lib, c) / pooled_tot for c in _CLASSES]
+
+    @staticmethod
+    def _wsum(frame: pl.DataFrame, oc: str) -> float:
         return float(frame.filter(pl.col("outcome") == oc)["w"].sum())
 
-    classes = ("UP", "DOWN", "VERTICAL")
-    pooled_tot = float(pooled["w"].sum()) or 1.0
-    prior = [wsum(pooled, c) / pooled_tot for c in classes]
+    def estimate(self, atr_pct: float | None = None) -> BarrierEstimate:
+        horizon, k_up, k_dn = self.horizon, self.k_up, self.k_dn
+        if self._lib.height == 0:
+            return _unavailable("no resolved paths in the library", 0.0,
+                                horizon=horizon, k_up=k_up, k_dn=k_dn)
+        key = None if atr_pct is None else (
+            0 if atr_pct <= self._q[0] else (1 if atr_pct <= self._q[1] else 2))
+        if key in self._cache:
+            return self._cache[key]
 
-    obs = [wsum(cell, c) for c in classes]
-    obs_tot = sum(obs) or 1.0
-    scale = n_eff / obs_tot          # convert weight mass to effective counts
+        lib = self._lib
+        cell = lib
+        if key is not None:
+            cell = lib.filter(pl.col("vol_tercile") == key)
+            if cell.height == 0:
+                cell = lib
 
-    alpha = [KAPPA * pr + o * scale for pr, o in zip(prior, obs, strict=True)]
-    a_tot = sum(alpha)
-    p = [a / a_tot for a in alpha]
+        # Kish effective sample size accounting for overlap concurrency (w ~ 1/h).
+        # Raw row counts are deliberately never used.
+        h = HORIZON_SESSIONS[horizon]
+        w = cell["w"]
+        sw, sw2 = float(w.sum()), float((w**2).sum())
+        n_eff = (sw * sw) / (h * sw2) if (sw2 > 0 and h > 0) else 0.0
 
-    # Posterior SD of the UP marginal (Dirichlet marginal is Beta).
-    a_up = alpha[0]
-    var_up = (a_up * (a_tot - a_up)) / (a_tot * a_tot * (a_tot + 1.0))
-    sd = var_up**0.5
-    lo = max(0.0, p[0] - 1.645 * sd)
-    hi = min(1.0, p[0] + 1.645 * sd)
+        if n_eff < MIN_N_EFF:
+            est = _unavailable(
+                f"library too small: n_eff {n_eff:.1f} of {MIN_N_EFF:.0f} required "
+                f"for {horizon.value.lower()}",
+                n_eff, horizon=horizon, k_up=k_up, k_dn=k_dn,
+            )
+            self._cache[key] = est
+            return est
 
-    return BarrierEstimate(
-        BarrierState.OK,
-        p_up=round(p[0], 4), p_dn=round(p[1], 4), p_vert=round(p[2], 4),
-        ci_lo=round(lo, 4), ci_hi=round(hi, 4),
-        n_eff=n_eff,
-        reason=f"empirical, {horizon.value.lower()} h={HORIZON_SESSIONS[horizon]}, "
-               f"k_up={k_up} k_dn={k_dn}",
-        horizon=horizon, k_up=k_up, k_dn=k_dn,
-    )
+        # Weighted counts in the cell, shrunk toward the pooled base rate.
+        obs = [self._wsum(cell, c) for c in _CLASSES]
+        obs_tot = sum(obs) or 1.0
+        scale = n_eff / obs_tot          # convert weight mass to effective counts
+
+        alpha = [KAPPA * pr + o * scale for pr, o in zip(self._prior, obs, strict=True)]
+        a_tot = sum(alpha)
+        p = [a / a_tot for a in alpha]
+
+        # Posterior SD of the UP marginal (Dirichlet marginal is Beta).
+        a_up = alpha[0]
+        var_up = (a_up * (a_tot - a_up)) / (a_tot * a_tot * (a_tot + 1.0))
+        sd = var_up**0.5
+        lo = max(0.0, p[0] - 1.645 * sd)
+        hi = min(1.0, p[0] + 1.645 * sd)
+
+        est = BarrierEstimate(
+            BarrierState.OK,
+            p_up=round(p[0], 4), p_dn=round(p[1], 4), p_vert=round(p[2], 4),
+            ci_lo=round(lo, 4), ci_hi=round(hi, 4),
+            n_eff=n_eff,
+            reason=f"empirical, {horizon.value.lower()} h={HORIZON_SESSIONS[horizon]}, "
+                   f"k_up={k_up} k_dn={k_dn}",
+            horizon=horizon, k_up=k_up, k_dn=k_dn,
+        )
+        self._cache[key] = est
+        return est
+
+
+_CLASSES = ("UP", "DOWN", "VERTICAL")

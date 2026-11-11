@@ -55,7 +55,8 @@ from ta_ledger.risk import (
     regime_caps,
 )
 
-from .barriers import build_path_library, estimate_barriers, known_paths
+from .barriers import BarrierModel, build_path_library, known_paths
+from .regime import regime_on
 from .factors.correlation import compute_pair_correlations
 from .factors.price import add_price_factors
 from .trend import add_trend_states
@@ -431,8 +432,14 @@ def run_nightly(
     feature_providers: Sequence[FeatureProviderPort] = (),
     edge_estimator: EdgeEstimatorPort | None = None,
     calibrator: ProbabilityCalibratorPort | None = None,
+    index_regime: pl.DataFrame | None = None,
 ) -> RunResult:
     """Produce the night's ranked trade plans and the rejection log.
+
+    `index_regime` (from `regime.regime_series`) switches the regime from the
+    breadth heuristic to the index rules and arms REG-01, the bear block. It is
+    passed only for research backtests and when `nightly.REG01_ENABLED` -- which
+    is False: ADR-0004 tested it out of sample and it lost to the control.
 
     `as_of` is the decision instant and is RECORDED, never re-derived: a replay
     in 2027 must stamp the instant the decision was actually made, not the one
@@ -471,7 +478,13 @@ def run_nightly(
         if row
     }
     regime, regime_note = infer_regime(market_breadth)
-    log.info("regime=%s (%s)", regime.value, regime_note)
+    if index_regime is not None:
+        regime, regime_note = regime_on(index_regime, d)
+    # REG-01: in an index BEAR regime no new long is opened -- not paced, not
+    # rotated into, not offered as a manual buy. Exits are untouched.
+    entries_blocked = index_regime is not None and regime is Regime.TREND_DOWN
+    log.info("regime=%s (%s)%s", regime.value, regime_note,
+             " -- REG-01 new entries blocked" if entries_blocked else "")
     caps = regime_caps(regime)
     new_cap = int(caps["new"])
 
@@ -491,6 +504,8 @@ def run_nightly(
     # Same fixed base-rate window as the backtest (ADR-0003), or the two
     # would quote different p_up for the same session.
     lib = known_paths(lib, d)
+    # One model per session: every candidate shares this library (see BarrierModel).
+    bmodel = BarrierModel(lib, horizon=Horizon.SWING, k_up=K_UP, k_dn=K_DN)
     log.info("path library: %d resolved paths", lib.height)
 
     recs: list[dict] = []
@@ -633,13 +648,7 @@ def run_nightly(
         price, atr = row.get("close"), row.get("atr14")
         if not price or not atr or atr <= 0:
             continue
-        est = estimate_barriers(
-            lib,
-            atr_pct=float(atr) / float(price),
-            horizon=Horizon.SWING,
-            k_up=K_UP,
-            k_dn=K_DN,
-        )
+        est = bmodel.estimate(float(atr) / float(price))
         if est.p_up is not None and est.p_dn is not None:
             if edge_estimator is not None or calibrator is not None:
                 edge_adj = float(edge_estimator.estimate_edge(row, est)) if edge_estimator is not None else 0.0
@@ -737,6 +746,7 @@ def run_nightly(
             and decision.rule_id in ("RISK-05", "RISK-06", "RISK-01")
             and pre_exp >= MIN_EXPECTANCY_ATR
             and new_entries_today < new_cap
+            and not entries_blocked
         ):
             eligible_positions = [
                 p for p in pf.positions
@@ -809,10 +819,7 @@ def run_nightly(
                               ProductType.DELIVERY)
         cost_bps = costs.bps_of(buy_turnover)
 
-        est = estimate_barriers(
-            lib, atr_pct=float(atr) / float(price),
-            horizon=Horizon.SWING, k_up=K_UP, k_dn=K_DN,
-        )
+        est = bmodel.estimate(float(atr) / float(price))
 
         if est.p_up is not None and est.p_dn is not None:
             if edge_estimator is not None or calibrator is not None:
@@ -838,7 +845,12 @@ def run_nightly(
         expectancy = gross_atr - cost_atr if p_up_eff is not None else 0.0
 
         tradeable = expectancy >= MIN_EXPECTANCY_ATR
-        if tradeable:
+        if tradeable and entries_blocked:
+            action = Action.WATCH
+            edge_note = (f"REG-01: would qualify (E={expectancy:+.3f} ATR) but new longs are "
+                         f"blocked in a BEAR regime -- {regime_note}.")
+            tradeable = False  # no size, and it must not join the simulated book
+        elif tradeable:
             new_entries_today += 1
             action = Action.BUY
             edge_note = (

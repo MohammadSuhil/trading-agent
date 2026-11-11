@@ -117,6 +117,8 @@ export const TriSourceChip = ({ value }: { value: unknown }) => render(value, TR
 const SUFFICIENCY: Record<string, Spec> = {
   OK: { tone: 'good', glyph: '✓', label: 'Sufficient' },
   INSUFFICIENT: { tone: 'warning', glyph: '!', label: 'Insufficient' },
+  // Enough evidence, but the thing that would use it is not built (M8).
+  NOT_BUILT: { tone: 'neutral', glyph: '—', label: 'Not built yet' },
 };
 export const SufficiencyChip = ({ value }: { value: unknown }) => render(value, SUFFICIENCY);
 

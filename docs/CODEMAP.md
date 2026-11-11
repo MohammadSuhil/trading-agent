@@ -154,6 +154,7 @@ Backfill and daily ingest.
 - `ingest_sessions(start: date, end: date, *, raw_root: str='data/raw') -> dict` -- Fetch and store every session in [start, end]. Idempotent.
 - `refresh_constituents(indices: tuple[str, ...]=('NIFTY50', 'NIFTY100', 'NIFTY200', 'NIFTY500'), snapshot_date: date | None=None, *, raw_root: str='data/raw') ...` -- Take a DATED snapshot of index membership + industry labels.
 - `refresh_symbol_master(*, raw_root: str='data/raw') -> int` -- NSE's EQUITY_L.csv -- the listed-security master.
+- `ingest_index_history(start: date, end: date, *, raw_root: str='data/raw') -> dict` -- Backfill `md.index_1d` alone, for dates that predate the bars we can parse.
 
 ### `packages/datafeed/src/ta_datafeed/http.py`
 
@@ -171,6 +172,13 @@ Parser for niftyindices.com constituent CSVs.
 - `constituents_url(index_name: str) -> str`
 - `parse_constituents(blob: bytes, index_name: str, snapshot_date: date, knowledge_time: datetime) -> pl.DataFrame` -- Parse into the `md.index_members` shape.
 
+### `packages/datafeed/src/ta_datafeed/parse/index_close.py`
+
+NSE daily index close file (`ind_close_all_DDMMYYYY.csv`).
+
+- `index_close_url(d: date) -> str` -- 'https://nsearchives.nseindia.com/content/indices/ind_close_all_11112026.csv'
+- `parse_index_close(blob: bytes, *, knowledge_time: datetime, session: date | None=None) -> pl.DataFrame` -- Parse the file into `md.index_1d` rows.
+
 ### `packages/datafeed/src/ta_datafeed/parse/udiff.py`
 
 Parser for the NSE UDiFF bhavcopy -- the project's primary EOD source.
@@ -178,6 +186,8 @@ Parser for the NSE UDiFF bhavcopy -- the project's primary EOD source.
 - `class BhavcopyFormatError(ValueError)` -- NSE changed the file shape. Fail loudly; do not guess.
 - `parse_udiff_bhavcopy(blob: bytes, *, knowledge_time: datetime, series: tuple[str, ...]=('EQ', 'BE')) -> pl.DataFrame` -- Parse one UDiFF bhavcopy into the `md.bars_1d` shape.
 - `bhavcopy_url(d: date) -> str` -- 'https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20261029_F_0000.csv.zip'
+- `legacy_bhavcopy_url(d: date) -> str` -- 'https://nsearchives.nseindia.com/content/historical/EQUITIES/2023/JUN/cm01JUN2023bhav.csv.zip'
+- `parse_legacy_bhavcopy(blob: bytes, *, knowledge_time: datetime, series: tuple[str, ...]=('EQ', 'BE')) -> pl.DataFrame` -- Parse a pre-UDiFF bhavcopy into exactly the `md.bars_1d` shape the UDiFF parser emits.
 
 ### `packages/datafeed/src/ta_datafeed/registry.py`
 
@@ -186,7 +196,7 @@ Source registry: primary and secondary exchange archive failover and reconciliat
 - `reconcile_isin_bars(nse_bars: pl.DataFrame | None, bse_bars: pl.DataFrame | None) -> pl.DataFrame` -- Combine NSE and BSE bars for a session without double-counting dual-listed scrips.
 - `class SourceRegistry` -- Manages primary (NSE) and secondary (BSE) archives with failover & reconciliation.
   - `fetch_session(self, d: date, *, reconcile: bool=True) -> SessionResult` -- Fetch session bars, falling back to BSE on FetchError and reconciling dual listings.
-  - `fetch_range(self, start: date, end: date, *, reconcile: bool=True) -> list[SessionResult]` -- Fetch all weekday sessions in [start, end].
+  - `fetch_range(self, start: date, end: date, *, reconcile: bool=True) -> list[SessionResult]` -- Fetch every session in [start, end], weekends included (NSE trades some).
 
 ### `packages/datafeed/src/ta_datafeed/sources/benchmark.py`
 
@@ -211,6 +221,7 @@ NSE published-archive source.
 - `class SessionResult`
 - `class NSEArchiveSource`
   - `fetch_session(self, d: date) -> SessionResult` -- Fetch one session's bars.
+  - `fetch_index_close(self, d: date) -> pl.DataFrame | None` -- OHLC for every NSE index on session `d`; None if NSE published none.
   - `fetch_range(self, start: date, end: date) -> list[SessionResult]`
   - `fetch_constituents(self, index_name: str, snapshot_date: date) -> pl.DataFrame`
 
@@ -259,6 +270,8 @@ P(target hit), P(stop hit), P(time-stop) -- the most dangerous numbers here.
 - `build_path_library(bars: pl.DataFrame, *, horizon: Horizon=Horizon.SWING, k_up: float=2.0, k_dn: float=1.0) -> pl.DataFrame` -- Resolve the triple barrier for every (symbol, start) in `bars`.
 - `known_paths(lib: pl.DataFrame, d, *, window: int | None=BASE_RATE_WINDOW_SESSIONS) -> pl.DataFrame` -- The paths a decision on session `d` may learn from.
 - `estimate_barriers(lib: pl.DataFrame, *, atr_pct: float | None=None, horizon: Horizon=Horizon.SWING, k_up: float=2.0, k_dn: float=1.0) -> BarrierEstimate` -- Posterior triad for a candidate, conditioned on its volatility tercile.
+- `class BarrierModel` -- `estimate_barriers` for one library, computed once per cell.
+  - `estimate(self, atr_pct: float | None=None) -> BarrierEstimate`
 
 ### `packages/quant/src/ta_quant/factors/correlation.py`
 
@@ -280,11 +293,12 @@ Database I/O for the nightly run. The pipeline itself stays pure.
 - `latest_session(ch: GuardedClient) -> date` -- Most recent session present in the store.
 - `load_panel_inputs(ch: GuardedClient, d: date, *, a: AsOf, lookback: int=LOOKBACK_SESSIONS) -> tuple[pl.DataFrame, pl.DataFrame]` -- Bars and dated index membership, both PIT-bounded at `a`.
 - `current_portfolio(ch: GuardedClient, *, equity: float=500000.0) -> Portfolio` -- Rebuild the open book. Empty on a fresh install, which is the honest
+- `load_index_regime(ch: GuardedClient, d: date, a: AsOf) -> pl.DataFrame` -- Regime series for the live arm, from index bars knowable at `a` (PIT).
 - `execute_nightly(d: date | None=None, *, equity: float=500000.0, replay: bool=False) -> RunResult` -- Run tonight's screen.
 - `resolve_past_recommendations(ch: GuardedClient, bars: pl.DataFrame, d: date, as_of: datetime) -> int` -- Evaluate past BUY and WATCH recommendations against historical paths to record outcomes.
 - `step_paper_book(ch: GuardedClient, res: RunResult, bars: pl.DataFrame, *, auto_buy: bool=True) -> None` -- Advance the paper trading book: mark MTM, resolve exits on daily bars,
 - `persist(ch: GuardedClient, res: RunResult) -> dict[str, int]` -- Write the run's outputs. Each table is independent, so one failure does
-- `execute_backtest(sessions: int=126, *, persist_results: bool=True) -> dict[str, Any]` -- Execute historical backtest over recent sessions and optionally persist equity curve.
+- `execute_backtest(sessions: int=126, *, persist_results: bool=True, arm: str='FROZEN_CONTROL', regime_filter: bool=False) -> dict[str, Any]` -- Execute historical backtest over recent sessions and optionally persist equity curve.
 
 ### `packages/quant/src/ta_quant/pipeline.py`
 
@@ -299,6 +313,15 @@ The nightly run: bars in, ranked trade plans out. Zero LLM calls.
 - `score_universe(panel: pl.DataFrame, d: date, tradeable: set[str]) -> pl.DataFrame` -- Cross-sectional composite, sector-neutralised.
 - `run_nightly(bars: pl.DataFrame, members: pl.DataFrame, *, d: date, portfolio: Portfolio, tradeable_index: str='NIFTY500', scored_index: str='NIFTY500', max_c...` -- Produce the night's ranked trade plans and the rejection log.
 
+### `packages/quant/src/ta_quant/regime.py`
+
+Index-based market regime: deterministic rules on the benchmark index (ADR-0004).
+
+- `classify(close: float, sma50: float | None, sma200: float | None, vol20: float | None, natr14: float | None) -> tuple[Regime, str]` -- One session's raw state, before hysteresis.
+- `apply_hysteresis(raw: list[Regime], *, loosen_after: int=LOOSEN_AFTER) -> list[Regime]` -- RISK-26: tighten on the first session; loosen only after `loosen_after`.
+- `regime_series(index_bars: pl.DataFrame, *, index_name: str=REGIME_INDEX) -> pl.DataFrame` -- Per-session regime for one index, strictly trailing, with hysteresis.
+- `regime_on(series: pl.DataFrame, d: date) -> tuple[Regime, str]` -- The regime in force at the close of `d` (latest row at or before d).
+
 ### `packages/quant/src/ta_quant/stats.py`
 
 Statistical validation, Deflated Sharpe Ratio, and bootstrap expectancy.
@@ -312,6 +335,8 @@ Statistical validation, Deflated Sharpe Ratio, and bootstrap expectancy.
 - `bootstrap_expectancy_ci(r_multiples: Sequence[float], *, n_boot: int=1000, ci: float=0.9, seed: int=42) -> tuple[float, float, float]` -- Deterministic seeded bootstrap confidence interval for mean expectancy (R-multiples).
 - `class BacktestStats` -- Summary statistics for backtest and paper trading performance.
 - `compute_backtest_stats(equity_curve: Sequence[Mapping[str, Any]], outcomes: Sequence[Mapping[str, Any]], *, n_trials: int=1, initial_equity: float=500000.0) ...` -- Compute comprehensive backtest performance and deflated risk statistics.
+- `class ForwardSimulation`
+- `block_bootstrap_forward(daily_returns: Sequence[float], *, n_trades: int, horizon: int=252, n_paths: int=2000, hold_sessions: int=10, seed: int=20261111, n_b...` -- Stationary block bootstrap (Politis & Romano 1994) of one-year outcomes.
 
 ### `packages/quant/src/ta_quant/trend.py`
 
@@ -442,6 +467,7 @@ FastAPI read model for the dashboard.
 - `GET /api/glossary glossary() -> dict` -- Plain-English meaning of every code the dashboard renders.
 - `GET /api/health health() -> dict`
 - `GET /api/context context() -> dict`
+- `humanize_regime(v: str) -> str`
 - `GET /api/heatmap heatmap() -> dict`
 - `GET /api/screener screener(limit: int=50) -> dict`
 - `GET /api/recommendations recommendations() -> dict`
@@ -450,12 +476,12 @@ FastAPI read model for the dashboard.
 - `POST /api/paper/buy paper_buy(body: dict) -> dict` -- Execute a manual paper BUY order.
 - `POST /api/paper/close paper_close(body: dict) -> dict` -- Execute a manual paper exit / close order.
 - `GET /api/backtest backtest() -> dict`
-- `POST /api/backtest/run run_backtest_api(body: dict | None=None) -> dict` -- Trigger a historical backtest execution and persist results.
+- `POST /api/backtest/run run_backtest_api(body: dict | None=None) -> dict` -- Run the control backtest and, unless `compare` is false, the ADR-0004
 - `GET /api/risk risk() -> dict`
 - `GET /api/industries industries() -> dict`
 - `GET /api/trend/{symbol} trend(symbol: str) -> dict`
-- `GET /api/calibration calibration() -> dict` -- Honest by construction: nothing has resolved yet, so there is nothing
-- `GET /api/simulation simulation() -> dict`
+- `GET /api/calibration calibration() -> dict` -- Never "OK" until a calibrator exists (M8) -- a sample count is not calibration.
+- `GET /api/simulation simulation() -> dict` -- The latest backtest's forward Monte Carlo, as the job recorded it.
 
 ### `apps/api/src/ta_api/serve.py`
 
@@ -472,6 +498,7 @@ Run the API on BOTH loopback addresses: 127.0.0.1 and ::1.
 - `cmd_cost(a: argparse.Namespace) -> int`
 - `cmd_ingest(a: argparse.Namespace) -> int`
 - `cmd_daily(a: argparse.Namespace) -> int` -- The whole nightly run, in the order the plan specifies.
+- `cmd_index_history(a: argparse.Namespace) -> int` -- Backfill md.index_1d only -- for regime checks on pre-bhavcopy history.
 - `cmd_constituents(a: argparse.Namespace) -> int`
 - `cmd_symbols(a: argparse.Namespace) -> int`
 - `cmd_screen(a: argparse.Namespace) -> int` -- Run tonight's screen and print the cards.

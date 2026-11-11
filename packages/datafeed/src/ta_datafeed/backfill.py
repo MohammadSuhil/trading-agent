@@ -27,14 +27,16 @@ def ingest_sessions(start: date, end: date, *, raw_root: str = "data/raw") -> di
     and the HTTP layer caches immutable bodies, so a repeat run costs almost
     nothing and cannot double-count.
     """
-    stats = {"requested": 0, "sessions": 0, "holidays": 0, "rows": 0, "failed": 0}
+    stats = {"requested": 0, "sessions": 0, "holidays": 0, "rows": 0, "failed": 0,
+             "index_rows": 0, "index_failed": 0}
     with PoliteClient(raw_root) as http, GuardedClient() as ch:
         src = NSEArchiveSource(http)
         d = start
         while d <= end:
-            if d.weekday() >= 5:
-                d += timedelta(days=1)
-                continue
+            # Weekends are probed too: NSE trades some (Muhurat, Budget-day and
+            # DR-drill sessions -- 2026-11-08 was one). Skipping them left
+            # silent holes: the next bar's 1-day return then spans two
+            # sessions. A weekend 404 costs one request and means "no session".
             stats["requested"] += 1
             try:
                 res = src.fetch_session(d)
@@ -51,6 +53,15 @@ def ingest_sessions(start: date, end: date, *, raw_root: str = "data/raw") -> di
                 stats["sessions"] += 1
                 stats["rows"] += n
                 log.info("%s: %d rows", d, n)
+                # Index OHLC feeds the regime filter. Its failure must not
+                # cost the day's bars, so it is counted, never raised.
+                try:
+                    idx = src.fetch_index_close(d)
+                    if idx is not None and idx.height:
+                        stats["index_rows"] += ch.insert_df("md.index_1d", idx)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("%s index close failed: %s", d, e)
+                    stats["index_failed"] += 1
             d += timedelta(days=1)
     return stats
 
@@ -106,3 +117,31 @@ def refresh_symbol_master(*, raw_root: str = "data/raw") -> int:
             pl.lit(datetime.now(UTC).replace(tzinfo=None)).cast(pl.Datetime("us")).alias("updated_at"),
         )
         return ch.insert_df("ref.symbols", out)
+
+
+def ingest_index_history(start: date, end: date, *, raw_root: str = "data/raw") -> dict:
+    """Backfill `md.index_1d` alone, for dates that predate the bars we can parse.
+
+    The UDiFF bhavcopy only exists from mid-2024, but the index close file
+    goes back years. Index history is what lets the regime filter be checked
+    out of sample (ADR-0004) -- on periods the strategy was never run on.
+    """
+    stats = {"requested": 0, "sessions": 0, "holidays": 0, "rows": 0, "failed": 0}
+    with PoliteClient(raw_root) as http, GuardedClient() as ch:
+        src = NSEArchiveSource(http)
+        d = start
+        while d <= end:
+            # weekends too -- see ingest_sessions
+            stats["requested"] += 1
+            try:
+                idx = src.fetch_index_close(d)
+                if idx is None or idx.is_empty():
+                    stats["holidays"] += 1
+                else:
+                    stats["rows"] += ch.insert_df("md.index_1d", idx)
+                    stats["sessions"] += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s index close failed: %s", d, e)
+                stats["failed"] += 1
+            d += timedelta(days=1)
+    return stats

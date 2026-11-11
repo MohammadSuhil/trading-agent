@@ -453,3 +453,89 @@ def compute_backtest_stats(
         avg_stop_slippage_bps=avg_stop_slippage_bps,
         positive_deflated_edge=positive_deflated_edge,
     )
+
+
+# ------------------------------------------------------- forward Monte Carlo
+#: PLAN.md "Honesty rules": the forward Monte Carlo refuses below these. A
+#: distribution fitted to less history is a picture of noise.
+SIM_MIN_DAYS = 750
+SIM_MIN_TRADES = 200
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardSimulation:
+    status: str                       # "OK" | "INSUFFICIENT"
+    n_days: int
+    n_trades: int
+    horizon: int
+    block_len: int | None = None
+    n_paths: int = 0
+    seed: int = 0
+    p_lo: float | None = None         # 5th pct of horizon return (fraction)
+    p_hi: float | None = None         # 95th pct
+    p_loss: float | None = None       # share of paths ending below start
+    histogram: tuple[tuple[float, int], ...] = ()
+
+
+def block_bootstrap_forward(
+    daily_returns: Sequence[float],
+    *,
+    n_trades: int,
+    horizon: int = 252,
+    n_paths: int = 2000,
+    hold_sessions: int = 10,
+    seed: int = 20261111,
+    n_buckets: int = 20,
+) -> ForwardSimulation:
+    """Stationary block bootstrap (Politis & Romano 1994) of one-year outcomes.
+
+    Resamples the engine's REALISED daily returns in blocks of geometric
+    length, so a losing streak stays a streak -- an iid bootstrap would shuffle
+    a 10-session drawdown into 10 unrelated bad days and understate the tail.
+    The mean block length is at least the 10-session swing hold, because a
+    position's daily returns are serially dependent for that long.
+
+    Refuses (returns INSUFFICIENT, no numbers) below SIM_MIN_DAYS of history or
+    SIM_MIN_TRADES closed trades. Seeded, so a replay reproduces it exactly.
+
+    >>> sim = block_bootstrap_forward([0.001] * 100, n_trades=10)
+    >>> sim.status, sim.p_lo, sim.p_hi
+    ('INSUFFICIENT', None, None)
+    >>> sim = block_bootstrap_forward([0.001, -0.0005] * 400, n_trades=250, n_paths=200)
+    >>> sim.status, sim.block_len, sim.n_days
+    ('OK', 10, 800)
+    >>> sim.p_lo <= sim.p_hi and 0.0 <= sim.p_loss <= 1.0
+    True
+    >>> sim == block_bootstrap_forward([0.001, -0.0005] * 400, n_trades=250, n_paths=200)
+    True
+    """
+    n = len(daily_returns)
+    if n < SIM_MIN_DAYS or n_trades < SIM_MIN_TRADES:
+        return ForwardSimulation("INSUFFICIENT", n, n_trades, horizon)
+
+    block_len = max(hold_sessions, math.ceil(n ** (1 / 3)))
+    p_new_block = 1.0 / block_len
+    rng = random.Random(seed)
+    ends: list[float] = []
+    for _ in range(n_paths):
+        growth, i = 1.0, rng.randrange(n)
+        for _ in range(horizon):
+            growth *= 1.0 + daily_returns[i]
+            i = rng.randrange(n) if rng.random() < p_new_block else (i + 1) % n
+        ends.append(growth - 1.0)
+    ends.sort()
+
+    def pct(q: float) -> float:
+        return ends[min(len(ends) - 1, int(q * len(ends)))]
+
+    lo, hi = ends[0], ends[-1]
+    width = (hi - lo) / n_buckets or 1.0
+    counts = [0] * n_buckets
+    for e in ends:
+        counts[min(n_buckets - 1, int((e - lo) / width))] += 1
+    hist = tuple((round(lo + k * width, 6), c) for k, c in enumerate(counts))
+    return ForwardSimulation(
+        "OK", n, n_trades, horizon, block_len, n_paths, seed,
+        p_lo=round(pct(0.05), 6), p_hi=round(pct(0.95), 6),
+        p_loss=round(sum(e < 0 for e in ends) / len(ends), 6), histogram=hist,
+    )

@@ -107,7 +107,9 @@ def test_risk_rules_expose_state_and_never_a_bare_unexplained_number():
 @needs_ch
 def test_calibration_and_simulation_refuse_rather_than_guess():
     cal = client.get("/api/calibration").json()
-    assert cal["state"] in {"OK", "INSUFFICIENT"}
+    # OK is unreachable until M8 builds a calibrator: a sample count is not calibration.
+    assert cal["state"] in {"INSUFFICIENT", "NOT_BUILT"}
+    assert cal["bins"] == [] and cal["resolution"] is None and cal["bss"] is None
     if cal["state"] == "INSUFFICIENT":
         assert cal["resolution"] is None and cal["bss"] is None
         assert str(cal["needed"]) in cal["note"]
@@ -117,6 +119,9 @@ def test_calibration_and_simulation_refuse_rather_than_guess():
     if sim["status"] == "INSUFFICIENT":
         assert sim["p_lo"] is None and sim["p_hi"] is None
         assert sim["note"]
+    else:  # OK only with real thresholds met and a real interval
+        assert sim["n_days"] >= sim["needed_days"] and sim["n_trades"] >= sim["needed_trades"]
+        assert sim["p_lo"] <= sim["p_hi"] and sim["histogram"]
 
 
 @needs_ch

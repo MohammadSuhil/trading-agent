@@ -191,3 +191,78 @@ CREATE TABLE IF NOT EXISTS ev.equity_daily (
     watermark  Float64
 ) ENGINE = ReplacingMergeTree()
 ORDER BY (arm, d);
+
+-- OHLC for every NSE index, one row per (index, session), from the published
+-- ind_close_all_DDMMYYYY.csv. Feeds the index regime (ADR-0004).
+CREATE TABLE IF NOT EXISTS md.index_1d (
+    d               Date,
+    index_name      LowCardinality(String),
+    open            Nullable(Float64),
+    high            Nullable(Float64),
+    low             Nullable(Float64),
+    close           Float64,
+    knowledge_time  DateTime64(3, 'UTC')
+) ENGINE = ReplacingMergeTree(knowledge_time)
+ORDER BY (index_name, d);
+
+-- Forward Monte Carlo of the backtest's realised daily returns, one row per
+-- backtest run (refusals included, so the UI can show exactly what it lacks).
+-- Computed by the job, never by the API (I-19, I-27).
+CREATE TABLE IF NOT EXISTS ev.simulation (
+    run_ts      DateTime64(3, 'UTC'),
+    arm         LowCardinality(String),
+    status      LowCardinality(String),
+    start_d     Date,
+    end_d       Date,
+    n_days      UInt32,
+    n_trades    UInt32,
+    horizon     UInt16,
+    block_len   Nullable(UInt16),
+    n_paths     UInt32,
+    seed        UInt64,
+    p_lo        Nullable(Float32),
+    p_hi        Nullable(Float32),
+    p_loss      Nullable(Float32),
+    hist_lo     Array(Float32),
+    hist_count  Array(UInt32)
+) ENGINE = MergeTree
+ORDER BY (arm, run_ts);
+
+-- The index regime recorded each night, with the numbers behind it.
+-- Informational only: it does not gate trades (ADR-0004).
+CREATE TABLE IF NOT EXISTS md.regime_daily (
+    d               Date,
+    model           LowCardinality(String),
+    index_name      LowCardinality(String),
+    regime          LowCardinality(String),
+    raw_regime      LowCardinality(String),
+    note            String,
+    sma50           Nullable(Float64),
+    sma200          Nullable(Float64),
+    vol20           Nullable(Float64),
+    natr14          Nullable(Float64),
+    knowledge_time  DateTime64(3, 'UTC')
+) ENGINE = ReplacingMergeTree(knowledge_time)
+ORDER BY (model, d);
+
+-- Report-only backtests of rule VARIANTS (e.g. the ADR-0004 regime filter),
+-- one row per run with its curve as arrays, so the Calibration page can draw
+-- them next to the control. Never ev.equity_daily: a rejected variant must
+-- not be able to overwrite the control's curve or touch the paper book (I-28).
+CREATE TABLE IF NOT EXISTS ev.backtest_variants (
+    run_ts          DateTime64(3, 'UTC'),
+    variant         LowCardinality(String),
+    start_d         Date,
+    end_d           Date,
+    n_sessions      UInt32,
+    n_trades        UInt32,
+    final_equity    Float64,
+    total_return    Float32,
+    sharpe          Float32,
+    max_drawdown    Float32,
+    win_rate        Float32,
+    curve_d         Array(Date),
+    curve_equity    Array(Float64),
+    curve_regime    Array(LowCardinality(String))
+) ENGINE = MergeTree
+ORDER BY (variant, run_ts);

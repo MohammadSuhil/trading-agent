@@ -115,15 +115,14 @@ class SourceRegistry:
         *,
         reconcile: bool = True,
     ) -> list[SessionResult]:
-        """Fetch all weekday sessions in [start, end]."""
+        """Fetch every session in [start, end], weekends included (NSE trades some)."""
         out: list[SessionResult] = []
         d = start
         while d <= end:
-            if d.weekday() < 5:
-                try:
-                    out.append(self.fetch_session(d, reconcile=reconcile))
-                except Exception as e:  # noqa: BLE001
-                    log.warning("Registry session %s failed: %s", d, e)
-                    out.append(SessionResult(d, None, was_session=False))
+            try:
+                out.append(self.fetch_session(d, reconcile=reconcile))
+            except Exception as e:  # noqa: BLE001
+                log.warning("Registry session %s failed: %s", d, e)
+                out.append(SessionResult(d, None, was_session=False))
             d += timedelta(days=1)
         return out
