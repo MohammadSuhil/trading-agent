@@ -4,7 +4,7 @@ import type { Recommendations, Trend } from '../api/types';
 import { ApiGate } from '../components/ApiGate';
 import { TagChip } from '../components/StateChip';
 import { Chip, Field, Panel, StatTile } from '../components/primitives';
-import { TermText } from '../components/Tooltip';
+import { TermInfo, TermText } from '../components/Tooltip';
 import { Candles } from '../charts/Candles';
 import type { Mode } from '../lib/theme';
 import { count, isStr, num, text } from '../lib/format';
@@ -112,13 +112,13 @@ export function Analysis({ version, mode }: { version: number; mode: Mode }) {
             <div className="grid gap-4 lg:grid-cols-2">
               <Panel title="Trend state" subtitle="20, 63 and 252 sessions — hover any state for the server's wording">
                 <div className="grid grid-cols-3 gap-4">
-                  <Field label="t20">
+                  <Field label="t20" term="t20">
                     <TagChip value={states?.t20} plain />
                   </Field>
-                  <Field label="t63">
+                  <Field label="t63" term="t63">
                     <TagChip value={states?.t63} plain />
                   </Field>
-                  <Field label="t252">
+                  <Field label="t252" term="t252">
                     <TagChip value={states?.t252} plain />
                   </Field>
                 </div>
@@ -131,14 +131,38 @@ export function Analysis({ version, mode }: { version: number; mode: Mode }) {
 
               <Panel title="Trend quality and relative strength">
                 <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                  <StatTile label="ER 63" value={num(t?.er_63)} footnote="efficiency ratio" />
+                  <StatTile
+                    label="ER 63"
+                    value={num(t?.er_63)}
+                    footnote={
+                      <>
+                        efficiency ratio <TermInfo code="er_63" className="ml-1 align-middle" />
+                      </>
+                    }
+                  />
                   <StatTile
                     label="ADX 14"
                     value={num(t?.adx14)}
                     footnote={<TermText code="ADX_TRENDING" className="text-muted" />}
                   />
-                  <StatTile label="Slope t 63" value={num(t?.slope_t_63)} footnote="t-stat of the 63d slope" />
-                  <StatTile label="Flips 63d" value={count(t?.flips_63d)} footnote="state changes" />
+                  <StatTile
+                    label="Slope t 63"
+                    value={num(t?.slope_t_63)}
+                    footnote={
+                      <>
+                        t-stat of the 63d slope <TermInfo code="slope_t_63" className="ml-1 align-middle" />
+                      </>
+                    }
+                  />
+                  <StatTile
+                    label="Flips 63d"
+                    value={count(t?.flips_63d)}
+                    footnote={
+                      <>
+                        state changes <TermInfo code="flips_63d" className="ml-1 align-middle" />
+                      </>
+                    }
+                  />
                   <StatTile
                     label="RS vs bench 63"
                     value={num(t?.rs_vs_bench_63)}

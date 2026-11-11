@@ -104,7 +104,7 @@ export type GlossaryTerm = {
   short?: S;
   plain?: S;
   why?: S;
-  group?: 'action' | 'reason' | 'sleeve' | 'trend' | 'metric' | string | null;
+  group?: 'action' | 'reason' | 'sleeve' | 'trend' | 'regime' | 'horizon' | 'metric' | 'risk' | 'audit' | string | null;
 };
 
 export type Glossary = { terms?: Record<string, GlossaryTerm> | null };
@@ -232,6 +232,40 @@ export type PositionRow = {
   horizon?: S;
 };
 
+export type EquityPoint = {
+  d?: S;
+  arm?: S;
+  equity?: N;
+  cash?: N;
+  deployed?: N;
+  heat_pct?: N;
+  drawdown_pct?: N;
+};
+
+export type BenchmarkPoint = {
+  d?: S;
+  index_id?: S;
+  series_kind?: S;
+  close?: N;
+  ret_1d?: N;
+  tri_source?: S;
+};
+
+export type TradeEvent = {
+  seq?: N;
+  ts?: S;
+  d?: S;
+  symbol?: S;
+  kind?: S;
+  side?: S;
+  qty?: N;
+  price?: N;
+  notional?: N;
+  cost_rupees?: N;
+  pnl_rupees?: N;
+  note?: S;
+};
+
 export type Portfolio = {
   equity?: N;
   cash?: N;
@@ -241,6 +275,32 @@ export type Portfolio = {
   drawdown_pct?: N;
   watermark?: N;
   n_positions?: N;
+  equity_curve?: List<EquityPoint>;
+  benchmark_curve?: List<BenchmarkPoint>;
+  trades?: List<TradeEvent>;
+};
+
+export type Backtest = {
+  state?: S;
+  arm?: S;
+  weights_version?: S;
+  weights_verified?: boolean | null;
+  weights_sha256?: S;
+  ledger_verified?: boolean | null;
+  stats_state?: 'OK' | 'INSUFFICIENT' | string | null;
+  n_sessions?: N;
+  needed_sessions?: N;
+  final_equity?: N;
+  total_return_pct?: N;
+  sharpe?: N;
+  n_trades?: N;
+  win_rate?: N;
+  psr?: N;
+  dsr?: N;
+  min_trl?: N;
+  note?: S;
+  equity_curve?: List<EquityPoint>;
+  benchmark_curve?: List<BenchmarkPoint>;
 };
 
 export type RuleState = 'OK' | 'WARN' | 'BREACH' | 'DISPLAY_ONLY';

@@ -96,14 +96,18 @@ const RULE_COLUMNS: Column<RiskRule>[] = [
     sortable: true,
     value: (r) => r.label ?? r.id,
     render: (r) => {
-      const term = ruleTerm(r.label);
+      const term = r.id ?? ruleTerm(r.label);
       const name = text(r.label, text(r.id));
       return (
         <div className="min-w-0">
           <div className="font-medium text-ink">
             {term ? <Term code={term}>{name}</Term> : name}
           </div>
-          {r.id && <div className="font-mono text-[10.5px] text-muted">{r.id}</div>}
+          {r.id && (
+            <div className="font-mono text-[10.5px] text-muted">
+              <Term code={r.id}>{r.id}</Term>
+            </div>
+          )}
         </div>
       );
     },
@@ -122,6 +126,7 @@ const RULE_COLUMNS: Column<RiskRule>[] = [
     sortable: true,
     value: (r) => r.headroom_pct,
     className: 'w-56',
+    term: 'headroom',
     render: (r) => (
       <div className="flex items-center gap-2">
         <div className="w-32">
@@ -153,6 +158,7 @@ const INDUSTRY_COLUMNS: Column<IndustryRow>[] = [
     sortable: true,
     value: (r) => r.notional,
     render: (r) => inr(r.notional),
+    term: 'deployed',
   },
   {
     key: 'n_names',
@@ -169,6 +175,7 @@ const INDUSTRY_COLUMNS: Column<IndustryRow>[] = [
     sortable: true,
     value: (r) => r.pct_equity,
     render: (r) => pctFrac(r.pct_equity),
+    term: 'equity',
   },
   {
     key: 'cap_pct',
@@ -177,6 +184,7 @@ const INDUSTRY_COLUMNS: Column<IndustryRow>[] = [
     sortable: true,
     value: (r) => r.cap_pct,
     render: (r) => pctFrac(r.cap_pct),
+    term: 'cap_pct',
   },
   {
     key: 'headroom',
@@ -184,6 +192,7 @@ const INDUSTRY_COLUMNS: Column<IndustryRow>[] = [
     sortable: true,
     value: (r) => r.headroom,
     className: 'w-56',
+    term: 'headroom',
     render: (r) => {
       // `headroom` is the one field here with no unit in the contract AND no
       // live example to check against (/api/industries returns [] today). Every

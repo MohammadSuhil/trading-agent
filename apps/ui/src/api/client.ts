@@ -164,3 +164,37 @@ export function useApi<T>(path: string | null, version = 0): ApiState<T> {
 
   return { data, error, loading, stale: loading && hasData.current, reload };
 }
+
+/**
+ * Send a JSON POST request.
+ *
+ * Throws an Error with the server's detail message on failure so calling views
+ * can catch and surface exact validation or rejection feedback.
+ */
+export async function postJson<T = unknown>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      accept: 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const txt = await res.text();
+      try {
+        const json = JSON.parse(txt);
+        detail = json.detail || json.message || txt.slice(0, 300);
+      } catch {
+        detail = txt.slice(0, 300);
+      }
+    } catch {
+      /* ignore */
+    }
+    const msg = detail ? `HTTP ${res.status}: ${detail}` : `HTTP ${res.status} ${res.statusText}`;
+    throw new Error(msg);
+  }
+  return (await res.json()) as T;
+}

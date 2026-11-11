@@ -12,8 +12,8 @@ the traps already known — plus line pointers into PLAN.md so you can read
 | --- | --- | --- | ---: | --- |
 | [M0](M0.md) | uv workspace, zero-I/O core, capped DBs, PIT leakage suite | ✅ done | — | — |
 | [M1](M1.md) | Real NSE data on screen: heat map + screener | ✅ done (BSE source → M2) | — | — |
-| [M2](M2.md) | Ledger, PaperBroker, factors, gates, frozen control — **plus the correctness gaps** | 🟡 partial | 29 | 3 days |
-| [M3](M3.md) | Backtester sharing the paper broker's fill/cost code | ❌ | 15 | 1 day |
+| [M2](M2.md) | Ledger, PaperBroker, factors, gates, frozen control — **plus the correctness gaps** | ✅ done | 29 | 3 days |
+| [M3](M3.md) | Backtester sharing the paper broker's fill/cost code | ✅ done | 15 | 1 day |
 | [M4](M4.md) | LLM plumbing: triple mutex, ladder, validators, generation record, OTel | ❌ | 14 | 2 days |
 | [M5](M5.md) | The committee, in shadow | ❌ | 17 (+5 p80) | 3 days |
 | [M6](M6.md) | Unattended operation | 🟡 launchd only | 13 | **7+ days** |

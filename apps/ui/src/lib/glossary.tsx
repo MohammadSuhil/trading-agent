@@ -62,7 +62,7 @@ export function useGlossary(): GlossaryIndex {
 }
 
 /** Order the Glossary view (and any grouped list) presents groups in. */
-export const GROUP_ORDER = ['action', 'reason', 'sleeve', 'trend', 'metric'] as const;
+export const GROUP_ORDER = ['action', 'reason', 'sleeve', 'trend', 'regime', 'horizon', 'metric', 'risk', 'audit'] as const;
 
 /** Section headings. These name the GROUP, they do not define any term. */
 export const GROUP_LABEL: Record<string, string> = {
@@ -70,5 +70,9 @@ export const GROUP_LABEL: Record<string, string> = {
   reason: 'Why a name was picked',
   sleeve: 'Strategy family',
   trend: 'Trend state',
+  regime: 'Market conditions (regime)',
+  horizon: 'Holding period (horizon)',
   metric: 'Numbers on the screen',
+  risk: 'Safety rules and rejection reasons',
+  audit: 'Verification, backtest and honesty metrics',
 };

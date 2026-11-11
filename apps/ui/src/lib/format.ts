@@ -140,6 +140,7 @@ export function dirOf(v: unknown): 'up' | 'down' | 'flat' {
  */
 export function stamp(v: unknown): string {
   if (!isStr(v)) return EM_DASH;
+  if (v.startsWith('1970-01-01') || v.startsWith('1970-01-02')) return EM_DASH;
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) return v;
   const datePart = d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });

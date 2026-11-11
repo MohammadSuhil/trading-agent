@@ -1,10 +1,9 @@
 from datetime import date
 
 import polars as pl
-
-import ta_quant.pipeline as pipeline
 from ta_core.enums import Regime
 from ta_ledger.risk import Portfolio
+from ta_quant import pipeline
 
 
 def test_market_regime_uses_nifty500_and_keeps_nifty200_breadth(monkeypatch):

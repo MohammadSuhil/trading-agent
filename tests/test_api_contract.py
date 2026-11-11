@@ -37,7 +37,7 @@ def test_health_always_answers_even_with_everything_down():
 @pytest.mark.parametrize("path", [
     "/api/context", "/api/heatmap", "/api/screener", "/api/recommendations",
     "/api/rejections", "/api/portfolio", "/api/risk", "/api/industries",
-    "/api/calibration", "/api/simulation",
+    "/api/calibration", "/api/simulation", "/api/backtest",
 ])
 def test_every_endpoint_returns_200_and_json(path: str):
     r = client.get(path)
@@ -140,3 +140,31 @@ def test_heatmap_is_not_swamped_by_an_unclassified_bucket():
 def test_an_unknown_symbol_404s_rather_than_500s():
     r = client.get("/api/trend/NOSUCHSYMBOL")
     assert r.status_code in {404, 503}
+
+
+def test_backtest_contract_and_glossary_coverage():
+    """Verify glossary covers core M2/M3 terms and /api/backtest contract holds."""
+    terms = client.get("/api/glossary").json()["terms"]
+    for required in ("RISK-01", "FROZEN_CONTROL", "LEDGER_CHAIN", "PSR", "DSR", "MinTRL"):
+        assert required in terms, f"glossary missing {required}"
+        assert terms[required]["short"]
+        assert terms[required]["plain"]
+
+    if _ch_up():
+        bt = client.get("/api/backtest").json()
+        assert bt["state"] in {"READY", "OK"}
+        assert bt["arm"] == "FROZEN_CONTROL"
+        assert bt["weights_version"] == "v1"
+        assert isinstance(bt["weights_verified"], bool)
+        assert isinstance(bt["weights_sha256"], str)
+        assert bt["ledger_verified"] is True
+        assert bt["stats_state"] in {"OK", "INSUFFICIENT"}
+        assert "n_sessions" in bt
+        assert "needed_sessions" in bt
+        assert "psr" in bt
+        assert "dsr" in bt
+        assert "min_trl" in bt
+        assert "note" in bt
+        assert isinstance(bt["equity_curve"], list)
+        assert isinstance(bt["benchmark_curve"], list)
+

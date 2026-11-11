@@ -4,7 +4,7 @@ import { ActionBadge, actionRail, actionSpec } from './action';
 import { TagChip } from './StateChip';
 import { Pill } from './ui';
 import { TrendMatrix, TrendPair } from './trend';
-import { Field, Disclosure, cn } from './primitives';
+import { Field, Disclosure, Chip, cn } from './primitives';
 import { Term, TermInfo, TermLabel, TermText } from './Tooltip';
 import { EM_DASH, EN_DASH, bps, count, inr, isNum, num, price, pctFrac, text } from '../lib/format';
 
@@ -265,20 +265,34 @@ export function RecommendationCard({
   density = 'comfortable',
   open,
   onToggle,
+  isOwned = false,
+  onPaperBuy,
+  buying = false,
 }: {
   r: RecommendationRow;
   density?: Density;
   open: boolean;
   onToggle: (next: boolean) => void;
+  isOwned?: boolean;
+  onPaperBuy?: (r: RecommendationRow) => void;
+  buying?: boolean;
 }) {
   const reasons = (r.reasons ?? []).filter((c): c is string => typeof c === 'string' && c.length > 0);
   const dense = density === 'compact';
+  const canBuy = ((isNum(r.qty) && r.qty > 0) || (isNum(r.would_qty) && r.would_qty > 0)) && !isOwned;
 
   return (
     <article className="panel relative overflow-hidden transition-shadow hover:shadow-raise">
       {/* Position AND colour: the action is readable from the rail alone while
-          scrolling, before any text has been read. */}
-      <div aria-hidden="true" className={cn('absolute inset-y-0 left-0 w-[3px]', actionRail(r.action))} />
+          scrolling, before any text has been read. Auto-bought / owned BUY cards
+          use a green rail so they visually distinguish from unbought BUY cards. */}
+      <div
+        aria-hidden="true"
+        className={cn(
+          'absolute inset-y-0 left-0 w-[3px]',
+          isOwned && actionSpec(r.action)?.code === 'BUY' ? 'bg-good' : actionRail(r.action),
+        )}
+      />
 
       <div className={cn('pl-5', dense ? 'p-3.5 pl-5' : 'p-4 pl-5')}>
         {/* 1 — what is this. 2 — what am I being told to do. Full weight, and
@@ -294,7 +308,24 @@ export function RecommendationCard({
               {text(r.industry, r.name ? '' : 'industry not set')}
             </p>
           </div>
-          <ActionBadge value={r.action} />
+          <div className="flex flex-wrap items-center gap-2">
+            {isOwned ? (
+              <Chip tone="good" glyph="✓">In portfolio</Chip>
+            ) : canBuy ? (
+              <button
+                type="button"
+                disabled={buying}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onPaperBuy?.(r);
+                }}
+                className="rounded-lg border border-accent bg-accent/10 px-2.5 py-1 text-[11.5px] font-semibold text-accent-ink hover:bg-accent/20 disabled:opacity-50"
+              >
+                {buying ? 'Buying…' : 'Paper buy'}
+              </button>
+            ) : null}
+            <ActionBadge value={r.action} />
+          </div>
         </header>
 
         {/* 3 — what is the plan. */}

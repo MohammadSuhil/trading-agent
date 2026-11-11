@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from typing import Any
 
 import polars as pl
 from ta_core.costs import compute_costs
 from ta_core.enums import (
+    HORIZON_SESSIONS,
     TREND_FOLLOWING_SLEEVES,
     Action,
     Horizon,
@@ -37,6 +40,11 @@ from ta_core.enums import (
     Sleeve,
     TrendState,
 )
+from ta_core.ports import (
+    EdgeEstimatorPort,
+    FeatureProviderPort,
+    ProbabilityCalibratorPort,
+)
 from ta_ledger.risk import (
     DEFAULT,
     Candidate,
@@ -44,9 +52,11 @@ from ta_ledger.risk import (
     Portfolio,
     Position,
     evaluate_entry,
+    regime_caps,
 )
 
 from .barriers import build_path_library, estimate_barriers
+from .factors.correlation import compute_pair_correlations
 from .factors.price import add_price_factors
 from .trend import add_trend_states
 
@@ -98,7 +108,12 @@ class RunResult:
     regime: Regime
 
 
-def build_panel(bars: pl.DataFrame, members: pl.DataFrame) -> pl.DataFrame:
+def build_panel(
+    bars: pl.DataFrame,
+    members: pl.DataFrame,
+    *,
+    feature_providers: Sequence[FeatureProviderPort] = (),
+) -> pl.DataFrame:
     """Factors + trend + industry labels for the whole panel.
 
     `members` carries the DATED industry label. Joining today's membership onto
@@ -106,11 +121,16 @@ def build_panel(bars: pl.DataFrame, members: pl.DataFrame) -> pl.DataFrame:
     caller must pass a snapshot read through the PIT guard.
     """
     panel = add_trend_states(add_price_factors(bars))
-    return panel.join(
+    joined = panel.join(
         members.select(["symbol", "industry", "company_name"]).unique(subset=["symbol"]),
         on="symbol",
         how="left",
     ).with_columns(pl.col("industry").fill_null("Unclassified"))
+    for provider in feature_providers:
+        res = provider.compute(joined)
+        if isinstance(res, pl.DataFrame):
+            joined = res
+    return joined
 
 
 def sector_aggregates(
@@ -125,7 +145,7 @@ def sector_aggregates(
     """
     day = panel.filter(pl.col("d") == d)
     if universe:
-        day = day.filter(pl.col("symbol").is_in(list(universe)))
+        day = day.filter(pl.col("symbol").is_in(sorted(universe)))
     day = day.filter(pl.col("industry") != "Unclassified")
     if day.height == 0:
         return pl.DataFrame()
@@ -176,7 +196,7 @@ def industry_trends(panel: pl.DataFrame, universe: set[str] | None = None) -> pl
     """
     df = panel.filter(pl.col("industry") != "Unclassified")
     if universe:
-        df = df.filter(pl.col("symbol").is_in(list(universe)))
+        df = df.filter(pl.col("symbol").is_in(sorted(universe)))
     if df.is_empty():
         return pl.DataFrame()
 
@@ -198,6 +218,7 @@ def industry_trends(panel: pl.DataFrame, universe: set[str] | None = None) -> pl
         (100.0 * (1.0 + pl.col("r")).cum_prod().over("industry")).alias("close")
     ).with_columns(
         pl.col("industry").alias("symbol"),
+        pl.col("close").alias("open"),
         pl.col("close").alias("high"),
         pl.col("close").alias("low"),
         pl.col("close").shift(1).over("industry").alias("prev_close"),
@@ -217,7 +238,7 @@ def industry_trends(panel: pl.DataFrame, universe: set[str] | None = None) -> pl
 
 
 def breadth_row(panel: pl.DataFrame, d: date, universe: str, symbols: set[str]) -> dict:
-    day = panel.filter((pl.col("d") == d) & pl.col("symbol").is_in(list(symbols)))
+    day = panel.filter((pl.col("d") == d) & pl.col("symbol").is_in(sorted(symbols)))
     if day.height == 0:
         return {}
     return {
@@ -302,13 +323,13 @@ def score_universe(panel: pl.DataFrame, d: date, tradeable: set[str]) -> pl.Data
     whichever sector ran hardest this month -- that is a sector bet wearing a
     stock-picking costume.
     """
-    day = panel.filter((pl.col("d") == d) & pl.col("symbol").is_in(list(tradeable)))
+    day = panel.filter((pl.col("d") == d) & pl.col("symbol").is_in(sorted(tradeable)))
     if day.height == 0:
         return day
 
     def z_in_sector(col: str) -> pl.Expr:
         c = pl.col(col)
-        return ((c - c.mean().over("industry")) / c.std().over("industry")).fill_nan(0.0)
+        return ((c - c.mean().over("industry")) / c.std().over("industry")).fill_nan(0.0).fill_null(0.0)
 
     day = day.with_columns(
         (pl.col("ret_21d") - pl.col("ret_21d").mean().over("industry")).alias("rs_sector"),
@@ -328,6 +349,72 @@ def score_universe(panel: pl.DataFrame, d: date, tradeable: set[str]) -> pl.Data
     )
 
 
+def _pm_conviction(
+    row: dict[str, Any],
+    est: Any,
+    pre_exp: float,
+    cost_atr: float,
+    ind_today: dict[str, dict],
+    corr_map: dict[str, dict[str, float]] | None = None,
+    open_positions: tuple[Position, ...] = (),
+) -> float:
+    """PM Conviction Score combining factor composite, conservative lower-bound
+    expectancy (at 90% CI lower bound `ci_lo`), multi-timeframe stock + industry
+    trend alignment, and marginal portfolio correlation penalty.
+    """
+    comp = float(row.get("composite") or 0.0)
+    if est.ci_lo is not None and est.p_up is not None and est.p_dn is not None:
+        p_up_cons = float(est.ci_lo)
+        shift = max(0.0, float(est.p_up) - p_up_cons)
+        p_dn_cons = min(1.0 - p_up_cons, float(est.p_dn) + shift)
+        cons_exp = (TARGET_ATR * p_up_cons) - (STOP_ATR * p_dn_cons) - cost_atr
+    else:
+        cons_exp = pre_exp
+
+    up_states = {TrendState.UP_STRONG.value, TrendState.UP.value}
+    dn_states = {TrendState.DOWN_STRONG.value, TrendState.DOWN.value, TrendState.DOWN_DECAYING.value}
+
+    align = 0.0
+    t63 = str(row.get("trend_63") or "UNDEFINED")
+    t252 = str(row.get("trend_252") or "UNDEFINED")
+    if t63 in up_states:
+        align += 0.25
+    elif t63 in dn_states:
+        align -= 0.25
+    if t252 in up_states:
+        align += 0.15
+    elif t252 in dn_states:
+        align -= 0.15
+
+    ind = str(row.get("industry") or "Unclassified")
+    ind63 = _ind(ind_today, ind, "ind_trend_63")
+    ind20 = _ind(ind_today, ind, "ind_trend_20")
+    if ind63 in up_states:
+        align += 0.35
+    elif ind63 in dn_states:
+        align -= 0.35
+    if ind20 in up_states:
+        align += 0.25
+    elif ind20 in dn_states:
+        align -= 0.25
+
+    sym = str(row.get("symbol") or "")
+    max_corr = 0.0
+    if open_positions:
+        if corr_map and sym in corr_map:
+            max_corr = max((corr_map[sym].get(p.symbol, 0.0) for p in open_positions), default=0.0)
+        if any(p.industry == ind for p in open_positions):
+            max_corr = max(max_corr, 0.35)
+
+    return (
+        0.45 * comp
+        + 2.50 * max(cons_exp, -0.50)
+        + 1.50 * max(pre_exp, -0.50)
+        + 0.30 * align
+        - 0.35 * max(0.0, max_corr)
+    )
+
+
 def run_nightly(
     bars: pl.DataFrame,
     members: pl.DataFrame,
@@ -339,6 +426,11 @@ def run_nightly(
     max_cards: int = 25,
     cfg=DEFAULT,
     as_of: datetime | None = None,
+    surveillance_symbols: set[str] | None = None,
+    run_id: str | None = None,
+    feature_providers: Sequence[FeatureProviderPort] = (),
+    edge_estimator: EdgeEstimatorPort | None = None,
+    calibrator: ProbabilityCalibratorPort | None = None,
 ) -> RunResult:
     """Produce the night's ranked trade plans and the rejection log.
 
@@ -346,10 +438,14 @@ def run_nightly(
     in 2027 must stamp the instant the decision was actually made, not the one
     the replay happens to run at.
     """
-    run_id = uuid.uuid4().hex[:12]
+    run_id = run_id or uuid.uuid4().hex[:12]
     as_of = as_of or datetime.now(UTC)
 
-    panel = build_panel(bars, members)
+    panel = (
+        build_panel(bars, members, feature_providers=feature_providers)
+        if feature_providers
+        else build_panel(bars, members)
+    )
     trade_syms = set(
         members.filter(pl.col("index_name") == tradeable_index)["symbol"].to_list()
     )
@@ -376,12 +472,20 @@ def run_nightly(
     }
     regime, regime_note = infer_regime(market_breadth)
     log.info("regime=%s (%s)", regime.value, regime_note)
+    caps = regime_caps(regime)
+    new_cap = int(caps["new"])
 
     scored = score_universe(panel, d, score_syms)
 
+    scored_syms = scored["symbol"].to_list() if not scored.is_empty() else []
+    all_relevant_syms = sorted(set(scored_syms) | {p.symbol for p in portfolio.positions})
+    corr_map = compute_pair_correlations(
+        panel, d, candidate_symbols=scored_syms, open_symbols=all_relevant_syms
+    )
+
     # Barrier library: built ONCE from the whole panel, not per candidate.
     lib = build_path_library(
-        panel.filter(pl.col("symbol").is_in(list(trade_syms))),
+        panel.filter(pl.col("symbol").is_in(sorted(trade_syms))),
         horizon=Horizon.SWING, k_up=K_UP, k_dn=K_DN,
     )
     log.info("path library: %d resolved paths", lib.height)
@@ -390,12 +494,201 @@ def run_nightly(
     rejs: list[dict] = []
     alternates: list[dict] = []
     max_alternates = max_cards
-    pf = portfolio
+    prior_positions = tuple(p for p in portfolio.positions if p.opened < d)
+    today_cost = sum(p.entry * p.qty for p in portfolio.positions if p.opened >= d)
+    pf = replace(portfolio, cash=portfolio.cash + today_cost, positions=prior_positions)
+    owned_syms = {p.symbol for p in prior_positions}
 
-    for row in scored.iter_rows(named=True):
+    # Open positions from prior sessions get HOLD or SELL cards (Invariant I-16: only owned symbols get HOLD/SELL)
+    for pos in prior_positions:
+        pos_df = panel.filter((pl.col("d") == d) & (pl.col("symbol") == pos.symbol))
+        if pos_df.is_empty():
+            continue
+        pos_row = pos_df.to_dicts()[0]
+        close = float(pos_row["close"])
+        atr = float(pos_row.get("atr14") or 0.0)
+        if atr <= 0:
+            atr = close * 0.02
+
+        sessions_held = int(
+            panel.filter(
+                (pl.col("symbol") == pos.symbol) & (pl.col("d") > pos.opened) & (pl.col("d") <= d)
+            ).height
+        )
+        max_sessions = (
+            HORIZON_SESSIONS.get(Horizon(pos.horizon), 10)
+            if pos.horizon in Horizon._value2member_map_
+            else 10
+        )
+
+        hit_stop = close <= pos.stop
+        hit_target = pos.target > 0 and close >= pos.target
+        hit_time_stop = sessions_held >= max_sessions
+        hit_trend_break = (
+            str(pos_row.get("trend_63") or "") in ("DOWN", "DOWN_STRONG")
+            and str(pos_row.get("trend_20") or "") in ("DOWN", "DOWN_STRONG")
+        )
+
+        is_sell = hit_stop or hit_target or hit_time_stop or hit_trend_break
+        if hit_stop:
+            reason_code = ReasonCode.STOP_DISCIPLINE.value
+            exit_note = "STOP_DISCIPLINE: price breached stop"
+        elif hit_target:
+            reason_code = ReasonCode.STOP_DISCIPLINE.value
+            exit_note = "TARGET_REACHED: price reached target"
+        elif hit_time_stop:
+            reason_code = ReasonCode.TIME_STOP.value
+            exit_note = f"TIME_STOP: held {sessions_held}/{max_sessions} sessions (vertical barrier expired)"
+        elif hit_trend_break:
+            reason_code = ReasonCode.REGIME_RISK_OFF.value
+            exit_note = "TREND_REVERSAL: 20d and 63d trends turned DOWN"
+        else:
+            reason_code = ""
+            exit_note = ""
+
+        action = Action.SELL.value if is_sell else Action.HOLD.value
+        reasons = [reason_code] if is_sell else _reasons(pos_row)
+        afford_note = exit_note if is_sell else f"open position ({sessions_held}/{max_sessions} sessions held)"
+
+        if is_sell:
+            st = round(pos.stop, 2)
+        else:
+            raw_st = max(pos.stop, round(close - STOP_ATR * atr, 2)) if close > (pos.entry + atr) else pos.stop
+            st = round(raw_st, 2)
+
+        tgt = round(pos.entry + TARGET_ATR * atr, 2)
+        e_lo = round(pos.entry * 0.995, 2)
+        e_hi = round(pos.entry * 1.005, 2)
+        if e_lo >= e_hi:
+            e_hi = round(e_lo + 0.01, 2)
+
+        if st >= e_lo:
+            st = round(e_lo - 0.01, 2)
+        if tgt <= e_hi:
+            tgt = round(e_hi + 0.01, 2)
+
+        notional = round(pos.qty * close, 2)
+        sleeve = _sleeve(pos_row)
+
+        recs.append({
+            "rec_id": f"{run_id}-{pos.symbol}",
+            "d": d,
+            "symbol": pos.symbol,
+            "name": pos_row.get("company_name") or pos.symbol,
+            "industry": pos.industry,
+            "arm": "DETERMINISTIC",
+            "action": action,
+            "sleeve": sleeve.value,
+            "horizon": Horizon.SWING.value,
+            "entry_lo": e_lo,
+            "entry_hi": e_hi,
+            "stop": st,
+            "target": tgt,
+            "qty": pos.qty,
+            "notional": notional,
+            "would_qty": pos.qty,
+            "would_notional": notional,
+            "would_risk_rupees": round(pos.qty * abs(pos.entry - st), 2),
+            "afford_note": afford_note,
+            "risk_rupees": round(pos.qty * max(0.0, close - st), 2),
+            "risk_pct": round((pos.qty * max(0.0, close - st)) / pf.equity, 5) if pf.equity else 0.0,
+            "rr": round((tgt - close) / max(0.01, close - st), 2) if close > st else 1.0,
+            "atr14": round(atr, 4),
+            "cost_bps": 0.0,
+            "expectancy_atr": 0.0,
+            "composite": round(float(pos_row.get("composite") or 0.0), 4),
+            "reasons": reasons,
+            "trend_20": str(pos_row.get("trend_20") or "UNDEFINED"),
+            "trend_63": str(pos_row.get("trend_63") or "UNDEFINED"),
+            "trend_252": str(pos_row.get("trend_252") or "UNDEFINED"),
+            "ind_trend_20": _ind(ind_today, pos.industry, "ind_trend_20"),
+            "ind_trend_63": _ind(ind_today, pos.industry, "ind_trend_63"),
+            "ind_trend_252": _ind(ind_today, pos.industry, "ind_trend_252"),
+            "barrier_wide": False,
+            "state": "OK",
+            "p_up": 0.5,
+            "p_dn": 0.5,
+            "p_vert": 0.0,
+            "ci_lo": 0.4,
+            "ci_hi": 0.6,
+            "n_eff": 100.0,
+            "barrier_state": "OK",
+            "barrier_reason": "open position tracked by portfolio",
+        })
+
+    # Expectancy-aware candidate ordering
+    nom_bps = compute_costs(75_000.0, 75_000.0, ProductType.DELIVERY).bps_of(75_000.0)
+    top_scored = scored.head(min(80, scored.height)).to_dicts() if not scored.is_empty() else []
+    candidate_rows: list[dict[str, Any]] = []
+    seen_syms: set[str] = set()
+
+    for row in top_scored:
+        sym = row["symbol"]
+        seen_syms.add(sym)
+        if sym in owned_syms:
+            continue
+        price, atr = row.get("close"), row.get("atr14")
+        if not price or not atr or atr <= 0:
+            continue
+        est = estimate_barriers(
+            lib,
+            atr_pct=float(atr) / float(price),
+            horizon=Horizon.SWING,
+            k_up=K_UP,
+            k_dn=K_DN,
+        )
+        if est.p_up is not None and est.p_dn is not None:
+            if edge_estimator is not None or calibrator is not None:
+                edge_adj = float(edge_estimator.estimate_edge(row, est)) if edge_estimator is not None else 0.0
+                raw_p_up = min(1.0, max(0.0, float(est.p_up) + edge_adj))
+                p_up_eff = (
+                    min(1.0, max(0.0, float(calibrator.calibrate(raw_p_up, horizon=Horizon.SWING.value, regime=regime.value))))
+                    if calibrator is not None
+                    else raw_p_up
+                )
+                p_dn_eff = max(0.0, min(1.0 - p_up_eff, float(est.p_dn) - (p_up_eff - float(est.p_up))))
+            else:
+                p_up_eff = float(est.p_up)
+                p_dn_eff = float(est.p_dn)
+
+            cost_atr_nom = (nom_bps / 10_000.0) * float(price) / float(atr)
+            pre_exp = (
+                (TARGET_ATR * p_up_eff)
+                - (STOP_ATR * p_dn_eff)
+                - cost_atr_nom
+            )
+        else:
+            cost_atr_nom = 0.0
+            pre_exp = -999.0
+        row["_pre_exp"] = pre_exp
+        row["_pm_conviction"] = _pm_conviction(
+            row, est, pre_exp, cost_atr_nom, ind_today, corr_map, pf.positions
+        )
+        candidate_rows.append(row)
+
+    candidate_rows.sort(
+        key=lambda r: (
+            r["_pre_exp"] >= MIN_EXPECTANCY_ATR,
+            float(r.get("_pm_conviction") or 0.0),
+        ),
+        reverse=True,
+    )
+
+    if not scored.is_empty():
+        for row in scored.iter_rows(named=True):
+            if row["symbol"] not in seen_syms and row["symbol"] not in owned_syms:
+                row["_pre_exp"] = -999.0
+                candidate_rows.append(row)
+
+    new_entries_today = 0
+    rotated_syms: set[str] = set()
+
+    for row in candidate_rows:
         if len(recs) >= max_cards:
             break
         sym = row["symbol"]
+        if sym in owned_syms:
+            continue
         price, atr = row.get("close"), row.get("atr14")
         if not price or not atr or atr <= 0:
             rejs.append({"symbol": sym, "rule_id": "DATA", "reason": "NO_ATR",
@@ -427,35 +720,72 @@ def run_nightly(
             price=float(price), stop=float(stop), target=float(target),
             adtv_rupees=float(row.get("adtv_20") or 0.0),
             n_trades=int(row.get("n_trades") or 0),
-            # Real listed history. This read `_bars_seen`, which the trend
-            # stage dropped along with every other underscore-prefixed
-            # column, so the value was always the 999 fallback and RISK-11's
-            # minimum-history gate could never fire -- a gate that renders
-            # green and never binds, which is exactly what the risk-test
-            # docstring warns about.
             listed_sessions=int(row.get("bars_seen") or 0),
             series=str(row.get("series") or "EQ"),
+            under_surveillance=(sym in (surveillance_symbols or set())),
+            pair_corr={p.symbol: corr_map.get(sym, {}).get(p.symbol, 0.0) for p in pf.positions},
         )
-        # Sequential construction against a RUNNING book, not against the
-        # starting portfolio each time. Sizing every candidate as though it
-        # were the only position is how a screener produces 25 cards that
-        # jointly breach every cap it claims to enforce -- the industry cap,
-        # the heat cap and the position count only bind if the book grows as
-        # candidates are accepted.
-        # TWO sizings, answering two different questions. Collapsing them was
-        # confusing: a card showed a size that shrank as earlier cards above it
-        # consumed the hypothetical book, so the same stock was "worth Rs 74k"
-        # at rank 3 and "Rs 0" at rank 20, for reasons invisible on the card.
-        #
-        #   decision   - what you are advised to buy NOW, gated against the
-        #                book as it fills. This is the instruction.
-        #   affordable - the most you could put into this name today given your
-        #                REAL portfolio: your risk appetite, the cash you hold,
-        #                and the headroom left in its industry. This is the
-        #                question "how much of this could I buy?" and it does
-        #                not change based on what ranked above it.
         decision: Decision = evaluate_entry(pf, cand, regime=regime, cfg=cfg)
         affordable: Decision = evaluate_entry(portfolio, cand, regime=regime, cfg=cfg)
+
+        pre_exp = float(row.get("_pre_exp", -999.0))
+        if (
+            not decision.allowed
+            and decision.rule_id in ("RISK-05", "RISK-06", "RISK-01")
+            and pre_exp >= MIN_EXPECTANCY_ATR
+            and new_entries_today < new_cap
+        ):
+            eligible_positions = [
+                p for p in pf.positions
+                if p.opened < d and p.symbol not in rotated_syms
+                and (
+                    decision.rule_id == "RISK-05"
+                    or (decision.rule_id == "RISK-06" and p.industry == cand.industry)
+                    or (decision.rule_id == "RISK-01" and pf.industry_notional(cand.industry) > 0 and p.industry == cand.industry)
+                )
+            ]
+            weak_candidates = []
+            for p in eligible_positions:
+                p_df = panel.filter((pl.col("d") == d) & (pl.col("symbol") == p.symbol))
+                if p_df.is_empty():
+                    continue
+                p_row = p_df.to_dicts()[0]
+                weak_comp = float(p_row.get("composite") or 0.0)
+                cand_comp = float(row.get("composite") or 0.0)
+                weak_t20 = str(p_row.get("trend_20") or "UNDEFINED")
+                weak_r = (p.last - p.entry) / max(p.entry - p.stop, 0.01)
+                if (cand_comp - weak_comp >= 0.35 or weak_t20 in ("DOWN_STEADY", "DOWN_DECAYING", "RANGE")) and weak_r < 0.75:
+                    weak_candidates.append((weak_comp, p, cand_comp))
+
+            if weak_candidates:
+                weak_candidates.sort(key=lambda item: item[0])
+                lowest_comp, weak_p, cand_comp = weak_candidates[0]
+                for r in recs:
+                    if r["symbol"] == weak_p.symbol:
+                        r["action"] = Action.SELL.value
+                        r["reasons"] = [ReasonCode.REGIME_CAP.value]
+                        r["afford_note"] = f"ROTATE_WEAKEST -> displaced by {sym} (comp {cand_comp:+.2f} vs {lowest_comp:+.2f})"
+                        break
+                pf = replace(
+                    pf,
+                    cash=pf.cash + weak_p.notional,
+                    positions=tuple(pos for pos in pf.positions if pos.symbol != weak_p.symbol),
+                )
+                rotated_syms.add(weak_p.symbol)
+                cand = Candidate(
+                    symbol=sym,
+                    industry=row.get("industry") or "Unclassified",
+                    price=float(price), stop=float(stop), target=float(target),
+                    adtv_rupees=float(row.get("adtv_20") or 0.0),
+                    n_trades=int(row.get("n_trades") or 0),
+                    listed_sessions=int(row.get("bars_seen") or 0),
+                    series=str(row.get("series") or "EQ"),
+                    under_surveillance=(sym in (surveillance_symbols or set())),
+                    pair_corr={p.symbol: corr_map.get(sym, {}).get(p.symbol, 0.0) for p in pf.positions},
+                )
+                decision = evaluate_entry(pf, cand, regime=regime, cfg=cfg)
+                affordable = evaluate_entry(portfolio, cand, regime=regime, cfg=cfg)
+
         if not decision.allowed:
             rejs.append({"symbol": sym, "rule_id": decision.rule_id,
                          "reason": decision.reason, "detail": decision.detail})
@@ -481,35 +811,51 @@ def run_nightly(
             horizon=Horizon.SWING, k_up=K_UP, k_dn=K_DN,
         )
 
+        if est.p_up is not None and est.p_dn is not None:
+            if edge_estimator is not None or calibrator is not None:
+                edge_adj = float(edge_estimator.estimate_edge(row, est)) if edge_estimator is not None else 0.0
+                raw_p_up = min(1.0, max(0.0, float(est.p_up) + edge_adj))
+                p_up_eff = (
+                    min(1.0, max(0.0, float(calibrator.calibrate(raw_p_up, horizon=Horizon.SWING.value, regime=regime.value))))
+                    if calibrator is not None
+                    else raw_p_up
+                )
+                p_dn_eff = max(0.0, min(1.0 - p_up_eff, float(est.p_dn) - (p_up_eff - float(est.p_up))))
+            else:
+                p_up_eff = float(est.p_up)
+                p_dn_eff = float(est.p_dn)
+        else:
+            p_up_eff = None
+            p_dn_eff = None
+
         # Expectancy in ATR units, AFTER costs. A candidate that cannot clear
         # its own frictions is not a trade, however good the signal looks.
-        gross_atr = (TARGET_ATR * (est.p_up or 0.0)) - (STOP_ATR * (est.p_dn or 0.0))
+        gross_atr = ((TARGET_ATR * p_up_eff) - (STOP_ATR * p_dn_eff)) if p_up_eff is not None and p_dn_eff is not None else 0.0
         cost_atr = (cost_bps / 10_000.0) * float(price) / float(atr)
-        expectancy = gross_atr - cost_atr if est.p_up is not None else 0.0
+        expectancy = gross_atr - cost_atr if p_up_eff is not None else 0.0
 
-        # RISK-P1, applied as a DOWNGRADE rather than a rejection, and the
-        # reason matters more than the rule.
-        #
-        # The barrier estimate is the arm-invariant BASE rate: by design it is
-        # symbol-agnostic, and the EDGE term that would differentiate this
-        # candidate contributes exactly 0.0 until the system has resolved
-        # enough of its own trades (n_eff >= 30) to have earned it. With
-        # symmetric-ish barriers a base rate is ~zero expectancy BEFORE costs
-        # and necessarily negative after them. So a hard +0.05 ATR gate on
-        # BASE alone rejects 100% of candidates on every night forever: that
-        # is not a risk control, it is a shutdown with extra steps.
-        #
-        # The honest treatment is to publish the plan and label it truthfully.
-        # A card marked NO_DEMONSTRATED_EDGE is informative; an empty screen
-        # that silently swallowed 367 candidates is not.
         tradeable = expectancy >= MIN_EXPECTANCY_ATR
-        action = Action.BUY if tradeable else Action.WATCH
-        edge_note = "" if tradeable else (
-            f"no demonstrated edge: E={expectancy:+.3f} ATR at base rates "
-            f"(p_up={est.p_up:.3f} p_dn={est.p_dn:.3f}), "
-            f"costs {cost_bps:.1f} bps = {cost_atr:.3f} ATR. "
-            f"EDGE term is 0.0 until the system has its own track record."
-        )
+        if tradeable:
+            new_entries_today += 1
+            action = Action.BUY
+            edge_note = (
+                ""
+                if new_entries_today <= new_cap
+                else f"Actionable BUY above today's auto-buy pace cap ({new_cap}/day in {regime.value}); available for manual Paper buy."
+            )
+        else:
+            action = Action.WATCH
+            p_str = (
+                f"p_up={est.p_up:.3f} p_dn={est.p_dn:.3f}"
+                if est.p_up is not None and est.p_dn is not None
+                else "barriers unavailable"
+            )
+            edge_note = (
+                f"no demonstrated edge: E={expectancy:+.3f} ATR at base rates "
+                f"({p_str}), "
+                f"costs {cost_bps:.1f} bps = {cost_atr:.3f} ATR. "
+                f"EDGE term is 0.0 until the system has its own track record."
+            )
 
         recs.append({
             "rec_id": f"{run_id}-{sym}", "d": d, "symbol": sym,
@@ -572,6 +918,8 @@ def run_nightly(
     # Alternates: good ideas the book had no room for. Shown as HOLD, never
     # BUY -- taking one would breach the cap that displaced it.
     for alt in alternates[: max(0, max_cards - len(recs)) + max_alternates]:
+        if alt["symbol"] in owned_syms:
+            continue
         row, cand = alt["row"], alt["cand"]
         price, atr = float(row["close"]), float(row["atr14"])
         recs.append({

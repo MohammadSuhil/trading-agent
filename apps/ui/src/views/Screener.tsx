@@ -56,6 +56,7 @@ const COLUMNS: Column<ScreenerRow>[] = [
     sortable: true,
     value: (r) => r.composite,
     render: (r) => <span className="font-semibold text-ink">{num(r.composite)}</span>,
+    term: 'composite',
   },
   {
     key: 'industry',
@@ -73,6 +74,7 @@ const COLUMNS: Column<ScreenerRow>[] = [
     sortable: true,
     value: (r) => r.ret_1d,
     render: (r) => <Delta value={r.ret_1d} format={(v) => signedPctFrac(v)} />,
+    term: 'ret_1d',
   },
   {
     key: 'ret_21d',
@@ -81,6 +83,7 @@ const COLUMNS: Column<ScreenerRow>[] = [
     sortable: true,
     value: (r) => r.ret_21d,
     render: (r) => <Delta value={r.ret_21d} format={(v) => signedPctFrac(v)} />,
+    term: 'ret_21d',
   },
   {
     key: 'rvol_20',
