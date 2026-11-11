@@ -277,6 +277,9 @@ P(target hit), P(stop hit), P(time-stop) -- the most dangerous numbers here.
 
 Pairwise Residual Correlation for RISK-08.
 
+- `class ResidualCorrelationIndex` -- Pre-indexed cross-sectionally demeaned daily returns for O(1) trailing RISK-08 lookups.
+  - `window_dates_for(self, d: date) -> list[date]`
+  - `corr(self, d: date, sym_a: str, sym_b: str, *, _wset: set[date] | None=None) -> float`
 - `compute_pair_correlations(panel: pl.DataFrame, d: date, candidate_symbols: Iterable[str], open_symbols: Iterable[str], *, window: int=63, min_periods: int=20...` -- Compute trailing pairwise residual correlation for RISK-08.
 
 ### `packages/quant/src/ta_quant/factors/price.py`
@@ -293,12 +296,13 @@ Database I/O for the nightly run. The pipeline itself stays pure.
 - `latest_session(ch: GuardedClient) -> date` -- Most recent session present in the store.
 - `load_panel_inputs(ch: GuardedClient, d: date, *, a: AsOf, lookback: int=LOOKBACK_SESSIONS) -> tuple[pl.DataFrame, pl.DataFrame]` -- Bars and dated index membership, both PIT-bounded at `a`.
 - `current_portfolio(ch: GuardedClient, *, equity: float=500000.0) -> Portfolio` -- Rebuild the open book. Empty on a fresh install, which is the honest
+- `benchmark_return(ch: GuardedClient, a: AsOf, start: date, end: date) -> float | None` -- Benchmark return over a backtest's dates, measured like the strategy's.
 - `load_index_regime(ch: GuardedClient, d: date, a: AsOf) -> pl.DataFrame` -- Regime series for the live arm, from index bars knowable at `a` (PIT).
 - `execute_nightly(d: date | None=None, *, equity: float=500000.0, replay: bool=False) -> RunResult` -- Run tonight's screen.
 - `resolve_past_recommendations(ch: GuardedClient, bars: pl.DataFrame, d: date, as_of: datetime) -> int` -- Evaluate past BUY and WATCH recommendations against historical paths to record outcomes.
 - `step_paper_book(ch: GuardedClient, res: RunResult, bars: pl.DataFrame, *, auto_buy: bool=True) -> None` -- Advance the paper trading book: mark MTM, resolve exits on daily bars,
 - `persist(ch: GuardedClient, res: RunResult) -> dict[str, int]` -- Write the run's outputs. Each table is independent, so one failure does
-- `execute_backtest(sessions: int=126, *, persist_results: bool=True, arm: str='FROZEN_CONTROL', regime_filter: bool=False) -> dict[str, Any]` -- Execute historical backtest over recent sessions and optionally persist equity curve.
+- `execute_backtest(sessions: int=126, *, persist_results: bool=True, arm: str='FROZEN_CONTROL', regime_filter: bool=False, run_id: str | None=None) -> dict[str...` -- Execute historical backtest over recent sessions and optionally persist equity curve.
 
 ### `packages/quant/src/ta_quant/pipeline.py`
 
@@ -475,13 +479,13 @@ FastAPI read model for the dashboard.
 - `GET /api/portfolio portfolio() -> dict`
 - `POST /api/paper/buy paper_buy(body: dict) -> dict` -- Execute a manual paper BUY order.
 - `POST /api/paper/close paper_close(body: dict) -> dict` -- Execute a manual paper exit / close order.
-- `GET /api/backtest backtest() -> dict`
-- `POST /api/backtest/run run_backtest_api(body: dict | None=None) -> dict` -- Run the control backtest and, unless `compare` is false, the ADR-0004
+- `GET /api/backtest backtest(sessions: int | None=None) -> dict` -- The stored backtest for one window -- the last run of THAT window.
+- `POST /api/backtest/run run_backtest_api(body: dict | None=None) -> dict` -- Run the control backtest for one window and, unless `compare` is false,
 - `GET /api/risk risk() -> dict`
 - `GET /api/industries industries() -> dict`
 - `GET /api/trend/{symbol} trend(symbol: str) -> dict`
 - `GET /api/calibration calibration() -> dict` -- Never "OK" until a calibrator exists (M8) -- a sample count is not calibration.
-- `GET /api/simulation simulation() -> dict` -- The latest backtest's forward Monte Carlo, as the job recorded it.
+- `GET /api/simulation simulation(sessions: int | None=None) -> dict` -- The forward Monte Carlo of the stored backtest for one window.
 
 ### `apps/api/src/ta_api/serve.py`
 

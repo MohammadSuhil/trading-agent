@@ -314,6 +314,21 @@ class PaperBroker:
         for order_id, order in list(self.pending_orders.items()):
             if order.placed_d >= d:
                 continue
+            if any(lot.symbol == order.symbol for lot in self.open_lots.values()):
+                del self.pending_orders[order_id]
+                ev = self._append_event(
+                    ts=ts,
+                    run_id=run_id,
+                    kind=EventKind.ORDER_EXPIRED,
+                    payload={
+                        "order_id": order.order_id,
+                        "symbol": order.symbol,
+                        "d": d.isoformat(),
+                        "reason": "ALREADY_OPEN",
+                    },
+                )
+                emitted.append(ev)
+                continue
             bar = bars_by_symbol.get(order.symbol)
             if not bar:
                 continue
@@ -506,6 +521,8 @@ class PaperBroker:
                 last=lot.last_price,
                 stop=lot.stop,
                 opened=lot.entry_date,
+                target=lot.target,
+                horizon=lot.horizon.value,
             )
             for lot in self.open_lots.values()
         )

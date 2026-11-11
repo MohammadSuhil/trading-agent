@@ -13,13 +13,88 @@ and each open position over the overlapping sessions in the trailing window.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 import math
 from collections.abc import Iterable
 from datetime import date
 
 import polars as pl
 
-__all__ = ["compute_pair_correlations"]
+__all__ = ["ResidualCorrelationIndex", "compute_pair_correlations"]
+
+
+def _pearson(x: list[float], y: list[float], min_periods: int) -> float:
+    n = len(x)
+    if n < min_periods:
+        return 0.0
+    mean_x = sum(x) / n
+    mean_y = sum(y) / n
+    cov = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y, strict=True))
+    var_x = sum((xi - mean_x) ** 2 for xi in x)
+    var_y = sum((yi - mean_y) ** 2 for yi in y)
+    if var_x <= 1e-12 or var_y <= 1e-12:
+        return 0.0
+    r = cov / math.sqrt(var_x * var_y)
+    return max(-1.0, min(1.0, float(r)))
+
+
+class ResidualCorrelationIndex:
+    """Pre-indexed cross-sectionally demeaned daily returns for O(1) trailing RISK-08 lookups.
+
+    Produces bit-identical correlations to `compute_pair_correlations(panel.filter(d <= session), session, ...)`
+    without re-scanning and re-demeaning the full panel on every backtest session.
+    """
+
+    def __init__(self, panel: pl.DataFrame, *, window: int = 63, min_periods: int = 20) -> None:
+        self.window = window
+        self.min_periods = min_periods
+        self._dates: list[date] = []
+        self._sym_series: dict[str, dict[date, float]] = {}
+
+        if panel.is_empty() or "d" not in panel.columns or "symbol" not in panel.columns:
+            return
+
+        sub = panel
+        if "ret_1d" not in sub.columns:
+            if "close" not in sub.columns:
+                return
+            sub = sub.sort(["symbol", "d"]).with_columns(
+                (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("ret_1d")
+            )
+
+        self._dates = sub.select("d").unique().sort("d")["d"].to_list()
+        demeaned = (
+            sub.with_columns((pl.col("ret_1d") - pl.col("ret_1d").mean().over("d")).alias("res_ret"))
+            .filter(pl.col("res_ret").is_not_null())
+            .select(["symbol", "d", "res_ret"])
+        )
+        for sym, dt, val in demeaned.iter_rows():
+            self._sym_series.setdefault(str(sym), {})[dt] = float(val)
+
+    def window_dates_for(self, d: date) -> list[date]:
+        idx = bisect_right(self._dates, d)
+        if idx < self.min_periods:
+            return []
+        return self._dates[max(0, idx - self.window) : idx]
+
+    def corr(self, d: date, sym_a: str, sym_b: str, *, _wset: set[date] | None = None) -> float:
+        if sym_a == sym_b:
+            return 1.0
+        a_data = self._sym_series.get(sym_a)
+        b_data = self._sym_series.get(sym_b)
+        if not a_data or not b_data:
+            return 0.0
+        if _wset is None:
+            wdates = self.window_dates_for(d)
+            if len(wdates) < self.min_periods:
+                return 0.0
+            _wset = set(wdates)
+        common = sorted(dt for dt in _wset if dt in a_data and dt in b_data)
+        if len(common) < self.min_periods:
+            return 0.0
+        x = [a_data[dt] for dt in common]
+        y = [b_data[dt] for dt in common]
+        return _pearson(x, y, self.min_periods)
 
 
 def compute_pair_correlations(
@@ -104,20 +179,6 @@ def compute_pair_correlations(
         s, dt, r = row[0], row[1], row[2]
         sym_series.setdefault(s, {})[dt] = float(r)
 
-    def _pearson(x: list[float], y: list[float]) -> float:
-        n = len(x)
-        if n < min_periods:
-            return 0.0
-        mean_x = sum(x) / n
-        mean_y = sum(y) / n
-        cov = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y, strict=True))
-        var_x = sum((xi - mean_x) ** 2 for xi in x)
-        var_y = sum((yi - mean_y) ** 2 for yi in y)
-        if var_x <= 1e-12 or var_y <= 1e-12:
-            return 0.0
-        r = cov / math.sqrt(var_x * var_y)
-        return max(-1.0, min(1.0, float(r)))
-
     for cand in cand_list:
         c_data = sym_series.get(cand)
         if not c_data:
@@ -134,6 +195,6 @@ def compute_pair_correlations(
                 continue
             x = [c_data[dt] for dt in common_dates]
             y = [p_data[dt] for dt in common_dates]
-            out[cand][pos_sym] = _pearson(x, y)
+            out[cand][pos_sym] = _pearson(x, y, min_periods)
 
     return out

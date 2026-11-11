@@ -218,3 +218,32 @@ def test_backtest_matches_paper():
     assert len(bt_res.outcomes) > 0
     assert bt_res.stats.n_trades == len(bt_res.outcomes)
     assert bt_res.stats.n_sessions == len(active_sessions)
+
+    # Assert no session ever holds duplicate concurrent lots in the same symbol
+    for ev in bt_res.events:
+        if ev.kind.value == "EQUITY_MARKED":
+            open_syms = [lot["symbol"] for lot in ev.payload["open_lots"]]
+            assert len(open_syms) == len(set(open_syms))
+
+
+def test_residual_correlation_index_matches_pair_correlations():
+    """ResidualCorrelationIndex must equal compute_pair_correlations bit-for-bit."""
+    from ta_quant.factors.correlation import (
+        ResidualCorrelationIndex,
+        compute_pair_correlations,
+    )
+
+    bars, members = _generate_synthetic_market(50)
+    panel = build_panel(bars, members)
+    idx = ResidualCorrelationIndex(panel)
+    syms = ["INFY", "TCS"]
+    for d in sorted(panel["d"].unique().to_list())[25::5]:
+        direct = compute_pair_correlations(
+            panel.filter(pl.col("d") <= d), d, candidate_symbols=syms, open_symbols=syms
+        )
+        wset = set(idx.window_dates_for(d))
+        for a in syms:
+            for b in syms:
+                assert idx.corr(d, a, b, _wset=wset if wset else None) == pytest.approx(
+                    direct[a][b], abs=1e-12
+                )
