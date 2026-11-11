@@ -69,7 +69,7 @@ Closed enumerations.
 - `class ProductType(StrEnum)` -- Drives the cost model: intraday and delivery are taxed differently.
 - `class Regime(StrEnum)` -- Market regime. Used as a risk gate that scales gross exposure --
 - `class Sleeve(StrEnum)` -- Strategy sleeves the Thompson sampler allocates across.
-- `class Arm(StrEnum)` -- The four arms scored identically every night.
+- `class Arm(StrEnum)` -- Arms scored identically every night.
 - `class BarrierHit(StrEnum)` -- Triple-barrier outcome.
 - `class ReasonCode(StrEnum)` -- Why the system took the trade. CLOSED SET.
 - `class FailureMode(StrEnum)` -- Assigned by the weekly critic to resolved losers. CLOSED SET,
@@ -105,9 +105,9 @@ Abstract port interfaces for market data and broker adapters.
   - `submit_order(self, intent: OrderIntent) -> Fill` -- Submit an order intent for execution, returning the fill result.
   - `cancel_order(self, order_id: str) -> bool` -- Cancel an open order by ID, returning True if cancelled.
 - `class DataSourcePort(Protocol)` -- Abstract port for raw market/alternative data fetchers.
-  - `fetch(self, d: date, *, as_of: AsOf | datetime | None=None) -> object` -- Fetch raw data for session d bounded by knowledge_time <= as_of.
+  - `fetch(self, d: date, *, as_of: AsOf | datetime | None=None) -> object` -- Fetch raw data for session `d` bounded by knowledge_time <= as_of.
 - `class FeatureProviderPort(Protocol)` -- Abstract port for computing additional feature sets over a panel.
-  - `compute(self, panel: object, *, d: date | None=None, as_of: AsOf | datetime | None=None) -> object` -- Compute and append additional feature columns to panel.
+  - `compute(self, panel: object, *, d: date | None=None, as_of: AsOf | datetime | None=None) -> object` -- Compute and append additional feature columns to `panel`.
 - `class EdgeEstimatorPort(Protocol)` -- Abstract port for model-driven edge estimators (e.g. GBDT meta-labeler).
   - `estimate_edge(self, row: Mapping[str, object], base_estimate: object) -> float` -- Estimate incremental edge (additive probability adjustment) for a candidate row.
 - `class ProbabilityCalibratorPort(Protocol)` -- Abstract port for point-in-time probability calibration (e.g. isotonic).
@@ -257,6 +257,7 @@ P(target hit), P(stop hit), P(time-stop) -- the most dangerous numbers here.
   - `wide(self) -> bool` -- True when the interval is too wide to quote a point estimate.
   - `as_dict(self) -> dict`
 - `build_path_library(bars: pl.DataFrame, *, horizon: Horizon=Horizon.SWING, k_up: float=2.0, k_dn: float=1.0) -> pl.DataFrame` -- Resolve the triple barrier for every (symbol, start) in `bars`.
+- `known_paths(lib: pl.DataFrame, d, *, window: int | None=BASE_RATE_WINDOW_SESSIONS) -> pl.DataFrame` -- The paths a decision on session `d` may learn from.
 - `estimate_barriers(lib: pl.DataFrame, *, atr_pct: float | None=None, horizon: Horizon=Horizon.SWING, k_up: float=2.0, k_dn: float=1.0) -> BarrierEstimate` -- Posterior triad for a candidate, conditioned on its volatility tercile.
 
 ### `packages/quant/src/ta_quant/factors/correlation.py`
@@ -290,7 +291,7 @@ Database I/O for the nightly run. The pipeline itself stays pure.
 The nightly run: bars in, ranked trade plans out. Zero LLM calls.
 
 - `class RunResult`
-- `build_panel(bars: pl.DataFrame, members: pl.DataFrame) -> pl.DataFrame` -- Factors + trend + industry labels for the whole panel.
+- `build_panel(bars: pl.DataFrame, members: pl.DataFrame, *, feature_providers: Sequence[FeatureProviderPort]=()) -> pl.DataFrame` -- Factors + trend + industry labels for the whole panel.
 - `sector_aggregates(panel: pl.DataFrame, d: date, universe: set[str] | None=None) -> pl.DataFrame` -- Industry rollup for the heat map. Precomputed so the endpoint is 1 SELECT.
 - `industry_trends(panel: pl.DataFrame, universe: set[str] | None=None) -> pl.DataFrame` -- Trend state per INDUSTRY, from a synthetic turnover-weighted index.
 - `breadth_row(panel: pl.DataFrame, d: date, universe: str, symbols: set[str]) -> dict`

@@ -34,6 +34,8 @@ silently unguarded.
 | I-19 | The API computes nothing: one SELECT per endpoint, every `*_pct` is a fraction of one | M1 | — |
 | I-20 | The API binds loopback only (`127.0.0.1` + `::1`), never `0.0.0.0` | M1 | — |
 | I-21 | `docs/CODEMAP.md` matches the code | M2 | `tests/test_codemap.py::test_committed_codemap_is_current` |
+| I-22 | Barrier base rates use only paths with `exit_d <= d` (resolution date, never start date), from the last 252 exit sessions, via the one `barriers.known_paths` shared by live and backtest ([ADR-0003](../ADR/0003-fixed-base-rate-window.md)) | M3 | `tests/test_barrier_library_pit.py::test_backtest_library_filter_equals_live_library`, `::test_base_rates_do_not_depend_on_how_much_history_is_loaded` |
+| I-23 | The Portfolio equity curve is the live paper book (`DETERMINISTIC`) only — no backtest arm is ever spliced in | M3 | `tests/test_api_contract.py::test_portfolio_equity_curve_is_only_the_live_paper_book` |
 | P-01 | Paper broker and backtester call the **same** `simulate_fill()` / `apply_costs()` objects (identity, not copies) | M2/M3 | `tests/test_backtest_matches_paper.py::test_backtest_matches_paper` |
 | P-02 | One RunManifest, created in M2; M3 replay and M4 generation records **extend** it, never fork it | M2 | `tests/test_ledger_rebuild.py::test_run_manifest_roundtrip_and_extension` |
 | P-03 | The ledger is hash-chained; a seq collision or gap fails `verify_chain()` | M2 | `tests/test_ledger_rebuild.py::test_seq_collision_and_gap_fail_verify_chain` |

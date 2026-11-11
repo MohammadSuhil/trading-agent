@@ -489,15 +489,15 @@ def portfolio() -> dict:
         pf = _portfolio(ch)
         a = _now()
         try:
+            # The live paper book ONLY. There used to be a fallback to "every
+            # arm" when the live book had <2 nights, which spliced the
+            # FROZEN_CONTROL backtest onto the live account as one line -- a
+            # simulated -12.7% presented as your money. The UI has an honest
+            # "needs 2 sessions" empty state; the backtest lives on /api/backtest.
             eq_df = ch.query_df(
                 "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
                 "FROM ev.equity_daily WHERE arm = 'DETERMINISTIC' ORDER BY d ASC LIMIT 1000"
             )
-            if eq_df.height < 2:
-                eq_df = ch.query_df(
-                    "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
-                    "FROM ev.equity_daily ORDER BY d ASC LIMIT 1000"
-                )
             if not eq_df.is_empty():
                 eq_df = eq_df.unique(subset=["d"], keep="last").sort("d")
             equity_curve = _rows(eq_df)
@@ -742,7 +742,7 @@ def paper_close(body: dict) -> dict:
 
         from ta_core.costs import compute_costs
         from ta_core.enums import ProductType
-        costs = compute_costs(pos_entry * pos_qty, exit_price * pos_qty, ProductType.DELIVERY).total()
+        costs = compute_costs(pos_entry * pos_qty, exit_price * pos_qty, ProductType.DELIVERY).total
         pnl_rupees = round((exit_price - pos_entry) * pos_qty - costs, 2)
 
         pos_close_df = pl.DataFrame([{

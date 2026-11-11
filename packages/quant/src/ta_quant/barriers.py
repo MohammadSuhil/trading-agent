@@ -141,6 +141,12 @@ def build_path_library(
         (pl.col("close") - k_dn * pl.col("atr14")).alias("_dn"),
         pl.int_range(pl.len()).over(s).alias("_i"),
         pl.len().over(s).alias("_n"),
+        # The session on which this path's window closes. A path is only
+        # *known* once its window has elapsed, so a backtest that builds the
+        # library once over the whole panel must filter on this, not on the
+        # start date `d` -- filtering on `d < session` admits the ~h starts
+        # whose outcomes are decided by bars after the session (look-ahead).
+        pl.col("d").shift(-h).over(s).alias("exit_d"),
     )
 
     # Forward scan, one shifted column per step. The first step whose bar
@@ -179,7 +185,45 @@ def build_path_library(
         (pl.col("atr14") / pl.col("close")).alias("atr_pct"),
     )
 
-    return df.select(["symbol", "d", "outcome", "w", "atr_pct"])
+    return df.select(["symbol", "d", "exit_d", "outcome", "w", "atr_pct"])
+
+
+#: How many sessions of RESOLVED paths feed the base rates (ADR-0003).
+#: With an expanding library the base rate -- and so whether the frozen
+#: control trades at all -- depended on how much history happened to be
+#: loaded: 420 sessions gave p_up 0.337 and 95 trades, 580 gave 0.313 and
+#: zero. A fixed window makes the estimate a function of the session alone.
+BASE_RATE_WINDOW_SESSIONS = 252
+
+
+def known_paths(
+    lib: pl.DataFrame, d, *, window: int | None = BASE_RATE_WINDOW_SESSIONS
+) -> pl.DataFrame:
+    """The paths a decision on session `d` may learn from.
+
+    Two cuts, both by `exit_d` (when the outcome became knowable), never by
+    start date: (1) `exit_d <= d`, so no path decided by bars after `d` leaks
+    in; (2) only the last `window` distinct exit sessions, so the base rate
+    does not drift with how much history was backfilled. The live nightly and
+    the backtest both call this, which is what keeps them equal.
+
+    >>> import polars as pl
+    >>> from datetime import date
+    >>> lib = pl.DataFrame({"exit_d": [date(2026, 1, i) for i in range(1, 11)]})
+    >>> known_paths(lib, date(2026, 1, 8), window=3)["exit_d"].dt.day().to_list()
+    [6, 7, 8]
+    >>> known_paths(lib, date(2026, 1, 8), window=None).height
+    8
+    """
+    if lib.is_empty():  # a too-short panel yields a column-less frame
+        return lib
+    known = lib.filter(pl.col("exit_d") <= d)
+    if window is None or known.is_empty():
+        return known
+    days = known["exit_d"].unique().sort()
+    if days.len() <= window:
+        return known
+    return known.filter(pl.col("exit_d") >= days[-window])
 
 
 def _vol_tercile(lib: pl.DataFrame) -> pl.DataFrame:

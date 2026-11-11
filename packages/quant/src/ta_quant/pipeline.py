@@ -55,7 +55,7 @@ from ta_ledger.risk import (
     regime_caps,
 )
 
-from .barriers import build_path_library, estimate_barriers
+from .barriers import build_path_library, estimate_barriers, known_paths
 from .factors.correlation import compute_pair_correlations
 from .factors.price import add_price_factors
 from .trend import add_trend_states
@@ -488,6 +488,9 @@ def run_nightly(
         panel.filter(pl.col("symbol").is_in(sorted(trade_syms))),
         horizon=Horizon.SWING, k_up=K_UP, k_dn=K_DN,
     )
+    # Same fixed base-rate window as the backtest (ADR-0003), or the two
+    # would quote different p_up for the same session.
+    lib = known_paths(lib, d)
     log.info("path library: %d resolved paths", lib.height)
 
     recs: list[dict] = []

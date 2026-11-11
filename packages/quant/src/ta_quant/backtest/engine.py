@@ -41,7 +41,7 @@ from ta_ledger.risk import (
     regime_caps,
 )
 
-from ..barriers import build_path_library, estimate_barriers
+from ..barriers import build_path_library, estimate_barriers, known_paths
 from ..pipeline import (
     _BOOK_LEVEL_RULES,
     K_DN,
@@ -208,15 +208,17 @@ def _screen_session(
     if scored.is_empty():
         return pl.DataFrame()
 
-    if lib is not None:
-        lib_today = lib.filter(pl.col("d") < d)
-    else:
-        lib_today = build_path_library(
+    if lib is None:
+        lib = build_path_library(
             panel.filter(pl.col("symbol").is_in(list(trade_syms))),
             horizon=Horizon.SWING,
             k_up=K_UP,
             k_dn=K_DN,
         )
+    # Cut by when each path RESOLVED (a start at d-3 is decided by bars up to
+    # d+7, which the live nightly cannot have seen) and to the same fixed
+    # window the live pipeline uses -- see `known_paths`.
+    lib_today = known_paths(lib, d)
 
     if ind_tr is None:
         ind_tr = industry_trends(panel, score_syms or trade_syms)

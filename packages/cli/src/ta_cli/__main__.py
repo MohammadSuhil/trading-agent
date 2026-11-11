@@ -220,7 +220,7 @@ def cmd_backtest(a: argparse.Namespace) -> int:
     print(f"  Sessions             : {res['n_sessions']}")
     print(f"  Initial Equity       : Rs {res['initial_equity']:,.2f}")
     print(f"  Final Equity         : Rs {res['final_equity']:,.2f}")
-    print(f"  Total Return         : {res['total_return_pct']:+.2f}%")
+    print(f"  Total Return         : {res['total_return_pct']:+.2%}")  # a fraction, like win_rate
     print(f"  Sharpe (Annualised)  : {res['sharpe']:.2f}")
     print(f"  Trades               : {res['n_trades']}")
     print(f"  Win Rate             : {res['win_rate']:.2%}")

@@ -168,3 +168,14 @@ def test_backtest_contract_and_glossary_coverage():
         assert isinstance(bt["equity_curve"], list)
         assert isinstance(bt["benchmark_curve"], list)
 
+
+
+@needs_ch
+def test_portfolio_equity_curve_is_only_the_live_paper_book():
+    """The Portfolio chart is "your money"; a backtest arm must never be spliced in.
+
+    A fallback to "all arms" when the live book had <2 nights once drew the
+    FROZEN_CONTROL backtest (-12.7%) and the live account as a single line.
+    """
+    curve = client.get("/api/portfolio").json()["equity_curve"]
+    assert {r.get("arm") for r in curve} <= {"DETERMINISTIC"}, {r.get("arm") for r in curve}

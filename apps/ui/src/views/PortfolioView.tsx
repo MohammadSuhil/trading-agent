@@ -202,6 +202,7 @@ export function PortfolioView({
 }) {
   const pf = useApi<Portfolio>('/api/portfolio', version);
   const p = pf.data;
+  const hasBenchmark = (p?.benchmark_curve?.length ?? 0) >= 2;
   const positions = p?.positions ?? [];
   const drawdown = p?.drawdown_pct;
 
@@ -307,10 +308,17 @@ export function PortfolioView({
           </div>
         </div>
 
+        {/* Only claim a benchmark when one is actually plotted: md.benchmark_1d
+            can be empty, and a "Benchmark: TRI" badge over a single line
+            invites a comparison the chart cannot make. */}
         <Panel
-          title="Equity curve vs. benchmark"
-          subtitle="Paper account value alongside the Nifty Total Return Index"
-          right={<TermLabel code="TRI">Benchmark: TRI</TermLabel>}
+          title={hasBenchmark ? 'Equity curve vs. benchmark' : 'Equity curve'}
+          subtitle={
+            hasBenchmark
+              ? 'Paper account value alongside the Nifty Total Return Index'
+              : 'Paper account value (no benchmark series loaded yet)'
+          }
+          right={hasBenchmark ? <TermLabel code="TRI">Benchmark: TRI</TermLabel> : undefined}
         >
           <EquityCurve
             equityCurve={p?.equity_curve ?? []}

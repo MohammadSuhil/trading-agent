@@ -341,7 +341,7 @@ def resolve_past_recommendations(
             mae_r = round((min_low - entry_price) / risk_unit, 4)
             mfe_r = round((max_high - entry_price) / risk_unit, 4)
             eval_qty = int(rec.get("qty") or rec.get("would_qty") or 1)
-            costs = compute_costs(entry_price * eval_qty, exit_price * eval_qty, ProductType.DELIVERY).total()
+            costs = compute_costs(entry_price * eval_qty, exit_price * eval_qty, ProductType.DELIVERY).total
             pnl_rupees = round((exit_price - entry_price) * eval_qty - costs, 2)
             arm = Arm.SHADOW_BUY.value if rec.get("action") == "BUY" else Arm.SHADOW_WATCH.value
             p_up = float(rec.get("p_up") or 0.0)
@@ -510,7 +510,7 @@ def step_paper_book(
             barrier_hit = "VERTICAL"
 
         if exited:
-            costs = compute_costs(pos_entry * pos_qty, exit_price * pos_qty, ProductType.DELIVERY).total()
+            costs = compute_costs(pos_entry * pos_qty, exit_price * pos_qty, ProductType.DELIVERY).total
             pnl_rupees = round((exit_price - pos_entry) * pos_qty - costs, 2)
 
             pos_close_df = pl.DataFrame([{
@@ -704,7 +704,7 @@ def step_paper_book(
                 else:
                     barrier_hit = "SIGNAL_SELL"
 
-                costs = compute_costs(pos_entry * pos_qty, exit_price * pos_qty, ProductType.DELIVERY).total()
+                costs = compute_costs(pos_entry * pos_qty, exit_price * pos_qty, ProductType.DELIVERY).total
                 pnl_rupees = round((exit_price - pos_entry) * pos_qty - costs, 2)
 
                 pos_close_df = pl.DataFrame([{
