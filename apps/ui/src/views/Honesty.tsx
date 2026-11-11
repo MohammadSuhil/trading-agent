@@ -10,7 +10,7 @@ import { Reliability } from '../charts/Reliability';
 import { Histogram } from '../charts/Histogram';
 import { EquityCurve } from '../charts/EquityCurve';
 import type { Mode } from '../lib/theme';
-import { EM_DASH, EN_DASH, count, inr, isNum, num, pctFrac, signedPctFrac, text } from '../lib/format';
+import { EM_DASH, EN_DASH, count, inr, isNum, num, pctFrac, signedPctFrac, stamp, text } from '../lib/format';
 
 /**
  * The refusal panel.
@@ -219,16 +219,41 @@ function SimulationPanel({ data, mode }: { data: Simulation | null; mode: Mode }
   );
 }
 
+const STANDARD_WINDOWS: Array<{ value: number; label: string }> = [
+  { value: 63, label: '63 sessions (~3M)' },
+  { value: 126, label: '126 sessions (~6M)' },
+  { value: 252, label: '252 sessions (~1Y)' },
+  // 750 is the forward simulation's refusal threshold (PLAN honesty rules)
+  { value: 750, label: '750 sessions (~3Y, enables simulation)' },
+  { value: 1250, label: '1250 sessions (~5Y)' },
+];
+
+/** "2026-11-11T17:43:26.897Z" (UTC) -> "11 Nov, 23:13 IST". */
+function istStamp(utc: string | null | undefined): string {
+  if (!utc) return EM_DASH;
+  // Accept ISO with or without an offset; bare "YYYY-MM-DD HH:MM:SS" is UTC.
+  let iso = utc.trim().replace(' ', 'T');
+  if (!/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(iso)) iso += 'Z';
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return utc;
+  return `${t.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  })} IST`;
+}
+
 function SystemIntegrityPanel({
   data,
   mode,
-  onRefresh,
+  sessions,
+  onSessions,
+  onRan,
 }: {
   data: Backtest | null;
   mode: Mode;
-  onRefresh?: () => void;
+  sessions: number;
+  onSessions: (n: number) => void;
+  onRan?: () => void;
 }) {
-  const [sessions, setSessions] = useState<number>(126);
   const [compare, setCompare] = useState<boolean>(true);
   const [running, setRunning] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
@@ -238,7 +263,7 @@ function SystemIntegrityPanel({
     setRunError(null);
     try {
       await postJson('/api/backtest/run', { sessions, compare });
-      onRefresh?.();
+      onRan?.();
     } catch (err) {
       setRunError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -247,6 +272,21 @@ function SystemIntegrityPanel({
   };
 
   const statsInsufficient = data?.stats_state !== 'OK';
+  const notRun = data?.state === 'NOT_RUN';
+  // useApi keeps the previous render while refetching (and on a failed fetch),
+  // so the shown data can belong to another window. Say so instead of
+  // presenting it under the newly selected window's label.
+  const stale = isNum(data?.sessions) && data?.sessions !== sessions;
+  // Standard windows plus any window stored by a CLI run (`ta backtest --sessions N`).
+  const stored = new Map((data?.windows ?? []).map((w) => [w.sessions ?? -1, w]));
+  const windowOptions = [
+    ...STANDARD_WINDOWS,
+    ...[...stored.keys()]
+      .filter((n) => n > 0 && !STANDARD_WINDOWS.some((w) => w.value === n))
+      .map((n) => ({ value: n, label: `${n} sessions (CLI run)` })),
+  ]
+    .sort((x, y) => x.value - y.value)
+    .map((o) => ({ ...o, lastRun: stored.get(o.value)?.last_run ?? null }));
 
   return (
     <Panel
@@ -300,16 +340,16 @@ function SystemIntegrityPanel({
               <span>Backtest window:</span>
               <select
                 value={sessions}
-                onChange={(e) => setSessions(Number(e.target.value))}
+                onChange={(e) => onSessions(Number(e.target.value))}
                 disabled={running}
                 className="rounded border border-line bg-surface px-2.5 py-1 text-xs text-ink"
               >
-                <option value={63}>63 sessions (~3M)</option>
-                <option value={126}>126 sessions (~6M)</option>
-                <option value={252}>252 sessions (~1Y)</option>
-                {/* 750 is the forward simulation's refusal threshold (PLAN honesty rules) */}
-                <option value={750}>750 sessions (~3Y, enables simulation)</option>
-                <option value={1250}>1250 sessions (~5Y)</option>
+                {windowOptions.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                    {o.lastRun ? ` · last run ${istStamp(o.lastRun)}` : ' · not run yet'}
+                  </option>
+                ))}
               </select>
             </label>
             <label className="flex items-center gap-1.5 text-xs text-ink">
@@ -348,7 +388,47 @@ function SystemIntegrityPanel({
             <p className="text-xs text-muted">Corrected for multiple testing, non-normality and track record length</p>
           </div>
 
-          {statsInsufficient ? (
+          {stale && (
+            <p className="mb-3 rounded-lg border border-warning/50 bg-warning/10 p-2.5 text-xs text-warning-ink">
+              Loading the {sessions}-session result… The figures below are still the {count(data?.sessions)}-session
+              run and will be replaced (if this does not change, the API may be restarting — refresh in a moment).
+            </p>
+          )}
+          {!stale && data?.run && isNum(data?.benchmark?.excess_return_pct) && (
+            <p className="mb-2 text-sm">
+              <Term code="NIFTY500_PRICE">
+                <span className="font-semibold">Benchmark verdict:</span>
+              </Term>{' '}
+              {data.benchmark?.beats_benchmark ? (
+                <span className="text-good-ink">
+                  beats the Nifty 500 by {signedPctFrac(data.benchmark?.excess_return_pct, 2)} pts over this window.
+                </span>
+              ) : (
+                <span className="text-critical-ink">
+                  trails the Nifty 500 by {pctFrac(Math.abs(data.benchmark?.excess_return_pct ?? 0), 2)} pts over
+                  this window ({signedPctFrac(data.total_return_pct, 2)} vs {signedPctFrac(data.benchmark?.return_pct, 2)}).
+                  Simply holding the index would have done better.
+                </span>
+              )}
+            </p>
+          )}
+          {data?.run && (
+            <p className="mb-3 text-xs text-ink2">
+              Showing the last <b className="text-ink">{count(data.sessions)}-session</b> run, made{' '}
+              <b className="text-ink">{istStamp(data.run.run_ts)}</b>, covering {stamp(data.run.start_d)} →{' '}
+              {stamp(data.run.end_d)}. It stays here until this window is run again; other windows keep their
+              own results.
+            </p>
+          )}
+          {notRun ? (
+            <Refusal
+              heading={`No backtest stored for the ${sessions}-session window yet.`}
+              have={0}
+              need={sessions}
+              unit="sessions run"
+              note={text(data?.note, 'Click "Run historical backtest" to create one for this window.')}
+            />
+          ) : statsInsufficient ? (
             <Refusal
               heading="Backtest significance is not established yet."
               have={data?.n_sessions}
@@ -446,8 +526,10 @@ function ComparisonNotes({ data }: { data: Backtest | null }) {
   const c = data?.comparison;
   const bench = data?.benchmark_curve ?? [];
   const sameWindow = Boolean(c?.same_window && (c?.curve?.length ?? 0) >= 2);
+  const bm = data?.benchmark;
   const rows: Array<{
     key: string; swatch: ReactNode; label: ReactNode; ret: N; equity: N; trades: N; sharpe: N; dd: N; win: N;
+    excess: N;
   }> = [
     {
       key: 'control',
@@ -455,6 +537,7 @@ function ComparisonNotes({ data }: { data: Backtest | null }) {
       label: <Term code="FROZEN_CONTROL"><span>Frozen control</span></Term>,
       ret: data?.total_return_pct ?? null, equity: data?.final_equity ?? null, trades: data?.n_trades ?? null,
       sharpe: data?.sharpe ?? null, dd: data?.max_drawdown ?? null, win: data?.win_rate ?? null,
+      excess: bm?.excess_return_pct ?? null,
     },
   ];
   if (sameWindow && c) {
@@ -464,6 +547,15 @@ function ComparisonNotes({ data }: { data: Backtest | null }) {
       label: <Term code="REGIME_FILTER"><span>Regime filter (rejected)</span></Term>,
       ret: c.total_return_pct ?? null, equity: c.final_equity ?? null, trades: c.n_trades ?? null,
       sharpe: c.sharpe ?? null, dd: c.max_drawdown ?? null, win: c.win_rate ?? null,
+      excess: c.excess_return_pct ?? null,
+    });
+  }
+  if (isNum(bm?.return_pct)) {
+    rows.push({
+      key: 'bench',
+      swatch: <span className="inline-block w-4 border-b-2 border-dotted border-muted" />,
+      label: <Term code="NIFTY500_PRICE"><span>Nifty 500 index (benchmark)</span></Term>,
+      ret: bm?.return_pct ?? null, equity: null, trades: null, sharpe: null, dd: null, win: null, excess: null,
     });
   }
   return (
@@ -474,6 +566,7 @@ function ComparisonNotes({ data }: { data: Backtest | null }) {
             <tr>
               <th className="px-3 py-2">Line</th>
               <th className="px-3 py-2 text-right">Return</th>
+              <th className="px-3 py-2 text-right">vs Nifty 500</th>
               <th className="px-3 py-2 text-right">Final equity</th>
               <th className="px-3 py-2 text-right">Trades</th>
               <th className="px-3 py-2 text-right">Sharpe</th>
@@ -486,6 +579,13 @@ function ComparisonNotes({ data }: { data: Backtest | null }) {
               <tr key={r.key} className="border-t border-line">
                 <td className="px-3 py-2"><span className="flex items-center gap-2">{r.swatch}{r.label}</span></td>
                 <td className="px-3 py-2 text-right">{signedPctFrac(r.ret, 2)}</td>
+                <td
+                  className={`px-3 py-2 text-right ${
+                    isNum(r.excess) ? (r.excess > 0 ? 'text-good-ink' : 'text-critical-ink') : 'text-muted'
+                  }`}
+                >
+                  {r.key === 'bench' ? 'benchmark' : isNum(r.excess) ? `${signedPctFrac(r.excess, 2)} pts` : EM_DASH}
+                </td>
                 <td className="px-3 py-2 text-right">{inr(r.equity)}</td>
                 <td className="px-3 py-2 text-right">{count(r.trades)}</td>
                 <td className="px-3 py-2 text-right">{num(r.sharpe, 2)}</td>
@@ -542,9 +642,13 @@ export function Honesty({
   mode: Mode;
   onRefresh?: () => void;
 }) {
+  // The selected window drives BOTH the backtest and the simulation panels:
+  // each window keeps its own last stored run (ev.backtest_runs).
+  const [sessions, setSessions] = useState<number>(126);
+  const [runNonce, setRunNonce] = useState(0);
   const calibration = useApi<Calibration>('/api/calibration', version);
-  const simulation = useApi<Simulation>('/api/simulation', version);
-  const backtest = useApi<Backtest>('/api/backtest', version);
+  const simulation = useApi<Simulation>(`/api/simulation?sessions=${sessions}`, version + runNonce);
+  const backtest = useApi<Backtest>(`/api/backtest?sessions=${sessions}`, version + runNonce);
 
   return (
     <ApiGate states={[calibration, simulation, backtest]}>
@@ -554,7 +658,16 @@ export function Honesty({
           reports the shortfall instead of a number — a probability the data cannot support is worse than no
           probability, because it gets acted on.
         </p>
-        <SystemIntegrityPanel data={backtest.data} mode={mode} onRefresh={onRefresh} />
+        <SystemIntegrityPanel
+          data={backtest.data}
+          mode={mode}
+          sessions={sessions}
+          onSessions={setSessions}
+          onRan={() => {
+            setRunNonce((n) => n + 1);
+            onRefresh?.();
+          }}
+        />
         <CalibrationPanel data={calibration.data} mode={mode} />
         <SimulationPanel data={simulation.data} mode={mode} />
       </div>

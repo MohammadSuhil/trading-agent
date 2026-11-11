@@ -235,6 +235,11 @@ def cmd_backtest(a: argparse.Namespace) -> int:
     print(f"  Initial Equity       : Rs {res['initial_equity']:,.2f}")
     print(f"  Final Equity         : Rs {res['final_equity']:,.2f}")
     print(f"  Total Return         : {res['total_return_pct']:+.2%}")  # a fraction, like win_rate
+    b = res.get("benchmark_return_pct")
+    if b is not None:  # ADR-0005: the index every strategy must beat
+        ex = res["total_return_pct"] - b
+        print(f"  {res.get('benchmark_index', 'Nifty 500') + ' (price)':<21}: {b:+.2%}")
+        print(f"  vs benchmark         : {ex:+.2%}  ({'BEATS' if ex > 0 else 'TRAILS'} the index)")
     print(f"  Sharpe (Annualised)  : {res['sharpe']:.2f}")
     print(f"  Trades               : {res['n_trades']}")
     print(f"  Win Rate             : {res['win_rate']:.2%}")

@@ -303,6 +303,28 @@ export type Backtest = {
   equity_curve?: List<EquityPoint>;
   benchmark_curve?: List<BenchmarkPoint>;
   comparison?: BacktestComparison | null;
+  /** Window (in sessions) this result belongs to. */
+  sessions?: N;
+  /** The stored run being shown; null when the window has never been run. */
+  run?: { run_id?: S; run_ts?: S; start_d?: S; end_d?: S } | null;
+  /** Every window that has a stored run, for the selector. */
+  windows?: List<BacktestWindow>;
+  /** ADR-0005: the index this run is judged against, over the run's own dates. */
+  benchmark?: {
+    index?: S;
+    series?: S;
+    return_pct?: N;
+    excess_return_pct?: N;
+    beats_benchmark?: boolean | null;
+  } | null;
+};
+
+export type BacktestWindow = {
+  sessions?: N;
+  last_run?: S;
+  start_d?: S;
+  end_d?: S;
+  total_return_pct?: N;
 };
 
 /** A report-only rule variant backtested over the control's window (ADR-0004). */
@@ -318,6 +340,7 @@ export type BacktestComparison = {
   sharpe?: N;
   max_drawdown?: N;
   win_rate?: N;
+  excess_return_pct?: N;
   curve?: List<{ d?: S; equity?: N; regime?: S }>;
 };
 

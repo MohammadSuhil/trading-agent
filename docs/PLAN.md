@@ -570,6 +570,8 @@ size, stop, target or rank, and never the sole reason code on a recommendation.
 
 Cost: ~50 extra ledger rows/day. **Demotion and promotion rules are pre-committed on day one, not retrofitted when you're emotionally invested:** `committee` (LLM) must beat `gbdt_meta` (not merely static linear weights) over 200 resolved trades to earn live capital promotion; otherwise `gbdt_meta` runs the book and the LLM remains an explanatory/veto shadow layer. If the Red Team shows no discriminative power after 100 challenges it is cut and its 14 GB reclaimed.
 
+**Market benchmark (added 2026-11-11, [ADR-0005](ADR/0005-nifty500-benchmark.md)):** beating the other arms is necessary, not sufficient. No arm or model drives the book unless, out of sample and after full Indian costs, it beats **both** `frozen_control` **and the Nifty 500 index** (price index — the free archive has no TRI, so a narrow win is a tie). As of 2026-11-11 the frozen control trails the Nifty 500 in every window tested (5 years: −7.6% vs +53.6%).
+
 ### The Five Architectural Surprises & Guardrails
 
 1. **Surprise 1 — The Missing Middle & Promotion Bar:** A purely linear factor model leaves substantial non-linear alpha (e.g. momentum only works when vol is low and market regime is `TREND_UP`) on the table, while LLMs cannot compute or aggregate 1.4M rows of price interactions. `GBDT_META` fills this missing middle. Consequently, `COMMITTEE` (LLM) must beat `GBDT_META` (not merely static linear weights) over 200 resolved trades to earn live capital promotion; otherwise `GBDT_META` runs the book and the LLM remains an explanatory/veto shadow layer.

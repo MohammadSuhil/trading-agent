@@ -17,9 +17,10 @@ Signatures: [docs/CODEMAP.md](../../docs/CODEMAP.md) § packages/quant.
 
 **Reads:** `md.bars_1d`, `md.index_members`, `md.index_1d` (Nifty 500 OHLC, via `query_pit`), `ev.positions`
 (open book). **Writes:** `md.sector_daily`, `md.trend_1d`, `md.breadth_daily`, `ev.recommendations`,
-`ev.rejections`, `md.regime_daily` (nightly, non-replay: the informational index regime), `ev.simulation`
-(every `execute_backtest`, refusals included), `ev.equity_daily` / `ev.outcomes` (FROZEN_CONTROL backtests
-only — regime-filter and DETERMINISTIC backtests are report-only, I-23).
+`ev.rejections`, `md.regime_daily` (nightly, non-replay: the informational index regime), `ev.backtest_runs`
+(every control or regime-filter backtest, one row per line, keyed by window — stats + simulation + curve,
+I-29), `ev.equity_daily` / `ev.outcomes` (latest FROZEN_CONTROL backtest only — regime-filter and
+DETERMINISTIC backtests never write them, I-28). `ev.simulation` / `ev.backtest_variants` are deprecated.
 
 **Replay caveat:** `md.index_members` holds dated snapshots from 2026-10-31 on, so a PIT replay of an
 earlier session sees no membership and yields no cards. Backtests use the current snapshot for all

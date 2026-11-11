@@ -157,7 +157,7 @@ def test_backtest_contract_and_glossary_coverage():
 
     if _ch_up():
         bt = client.get("/api/backtest").json()
-        assert bt["state"] in {"READY", "OK"}
+        assert bt["state"] in {"READY", "OK", "NOT_RUN"}
         assert bt["arm"] == "FROZEN_CONTROL"
         assert bt["weights_version"] == "v1"
         assert isinstance(bt["weights_verified"], bool)

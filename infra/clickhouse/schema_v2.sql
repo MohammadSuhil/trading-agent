@@ -205,6 +205,8 @@ CREATE TABLE IF NOT EXISTS md.index_1d (
 ) ENGINE = ReplacingMergeTree(knowledge_time)
 ORDER BY (index_name, d);
 
+-- DEPRECATED 2026-11-11: superseded by ev.backtest_runs (per-window storage);
+-- no longer written. Kept so the rows already recorded stay readable.
 -- Forward Monte Carlo of the backtest's realised daily returns, one row per
 -- backtest run (refusals included, so the UI can show exactly what it lacks).
 -- Computed by the job, never by the API (I-19, I-27).
@@ -245,6 +247,8 @@ CREATE TABLE IF NOT EXISTS md.regime_daily (
 ) ENGINE = ReplacingMergeTree(knowledge_time)
 ORDER BY (model, d);
 
+-- DEPRECATED 2026-11-11: superseded by ev.backtest_runs (per-window storage);
+-- no longer written. Kept so the rows already recorded stay readable.
 -- Report-only backtests of rule VARIANTS (e.g. the ADR-0004 regime filter),
 -- one row per run with its curve as arrays, so the Calibration page can draw
 -- them next to the control. Never ev.equity_daily: a rejected variant must
@@ -266,3 +270,51 @@ CREATE TABLE IF NOT EXISTS ev.backtest_variants (
     curve_regime    Array(LowCardinality(String))
 ) ENGINE = MergeTree
 ORDER BY (variant, run_ts);
+
+-- Every backtest run, kept PER WINDOW: one row per (run, line). The Calibration
+-- page shows the latest row for the window selected, so a 252-session result
+-- survives running a 1250-session one. Holds the job's own statistics and
+-- forward-simulation verdict (the API recomputes nothing, I-19) and the curve
+-- with the index regime on each day. Supersedes ev.simulation and
+-- ev.backtest_variants, which held only the latest run of anything.
+-- line: FROZEN_CONTROL | REGIME_FILTER. run_id pairs the lines of one click.
+CREATE TABLE IF NOT EXISTS ev.backtest_runs (
+    run_id          String,
+    run_ts          DateTime64(3, 'UTC'),
+    line            LowCardinality(String),
+    sessions        UInt32,
+    start_d         Date,
+    end_d           Date,
+    n_sessions      UInt32,
+    n_trades        UInt32,
+    initial_equity  Float64,
+    final_equity    Float64,
+    total_return    Float32,
+    sharpe          Float32,
+    psr             Nullable(Float32),
+    dsr             Nullable(Float32),
+    min_trl         Nullable(Float32),
+    win_rate        Float32,
+    max_drawdown    Float32,
+    -- Benchmark over the run's exact dates (ADR-0005): the Nifty 500 index.
+    -- Added by ALTER on 2026-11-11 -- CREATE IF NOT EXISTS never adds columns
+    -- to an existing table (HANDOFF gotcha 5); this keeps fresh installs equal.
+    bench_index     LowCardinality(String) DEFAULT '',
+    bench_return    Nullable(Float32),
+    excess_return   Nullable(Float32),
+    sim_status      LowCardinality(String),
+    sim_horizon     UInt16,
+    sim_block_len   Nullable(UInt16),
+    sim_n_paths     UInt32,
+    sim_p_lo        Nullable(Float32),
+    sim_p_hi        Nullable(Float32),
+    sim_p_loss      Nullable(Float32),
+    sim_hist_lo     Array(Float32),
+    sim_hist_count  Array(UInt32),
+    curve_d         Array(Date),
+    curve_equity    Array(Float64),
+    curve_drawdown  Array(Float32),
+    curve_heat      Array(Float32),
+    curve_regime    Array(LowCardinality(String))
+) ENGINE = MergeTree
+ORDER BY (line, sessions, run_ts);
