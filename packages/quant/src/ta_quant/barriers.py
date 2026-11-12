@@ -73,6 +73,7 @@ class BarrierEstimate:
     horizon: Horizon = Horizon.SWING
     k_up: float = 2.0
     k_dn: float = 1.0
+    v_atr: float = 0.0
 
     @property
     def wide(self) -> bool:
@@ -149,15 +150,17 @@ def build_path_library(
         pl.col("d").shift(-h).over(s).alias("exit_d"),
     )
 
-    # Forward scan, one shifted column per step. The first step whose bar
-    # touches a barrier wins; ties within a bar resolve DOWN (pessimistic).
-    hit_up = pl.lit(None, dtype=pl.Int32)
-    hit_dn = pl.lit(None, dtype=pl.Int32)
-    for step in range(1, h + 1):
+    # Reverse scan from step=h down to 1 so each expression references the
+    # accumulator only ONCE (O(h) AST nodes). Forward accumulation with
+    # `when(hit.is_null() & ...).otherwise(hit)` embeds `hit` twice per step
+    # (O(2^h) AST blowup, hanging Polars at Horizon.POSITIONAL h=60).
+    hit_up: pl.Expr = pl.lit(None, dtype=pl.Int32)
+    hit_dn: pl.Expr = pl.lit(None, dtype=pl.Int32)
+    for step in range(h, 0, -1):
         fh = pl.col("high").shift(-step).over(s)
         fl = pl.col("low").shift(-step).over(s)
-        hit_up = pl.when(hit_up.is_null() & (fh >= pl.col("_up"))).then(step).otherwise(hit_up)
-        hit_dn = pl.when(hit_dn.is_null() & (fl <= pl.col("_dn"))).then(step).otherwise(hit_dn)
+        hit_up = pl.when(fh >= pl.col("_up")).then(step).otherwise(hit_up)
+        hit_dn = pl.when(fl <= pl.col("_dn")).then(step).otherwise(hit_dn)
 
     df = df.with_columns(hit_up.alias("_hu"), hit_dn.alias("_hd"))
 
@@ -183,9 +186,11 @@ def build_path_library(
         # inflate n_eff by an order of magnitude.
         pl.lit(1.0 / h).alias("w"),
         (pl.col("atr14") / pl.col("close")).alias("atr_pct"),
+        # v_atr: price change over the horizon in ATR units
+        ((pl.col("close").shift(-h).over(s) - pl.col("close")) / pl.col("atr14")).alias("v_atr"),
     )
 
-    return df.select(["symbol", "d", "exit_d", "outcome", "w", "atr_pct"])
+    return df.select(["symbol", "d", "exit_d", "outcome", "w", "atr_pct", "v_atr"])
 
 
 #: How many sessions of RESOLVED paths feed the base rates (ADR-0003).
@@ -354,6 +359,15 @@ class BarrierModel:
         lo = max(0.0, p[0] - 1.645 * sd)
         hi = min(1.0, p[0] + 1.645 * sd)
 
+        # Compute v_atr for VERTICAL outcomes without calling _wsum (perf guard)
+        mean_v_atr = 0.0
+        if "v_atr" in cell.columns:
+            vert_cell = cell.filter(pl.col("outcome") == "VERTICAL")
+            if vert_cell.height > 0:
+                vert_w = float(vert_cell["w"].sum())
+                if vert_w > 0:
+                    mean_v_atr = float((vert_cell["v_atr"] * vert_cell["w"]).sum() / vert_w)
+
         est = BarrierEstimate(
             BarrierState.OK,
             p_up=round(p[0], 4), p_dn=round(p[1], 4), p_vert=round(p[2], 4),
@@ -362,6 +376,7 @@ class BarrierModel:
             reason=f"empirical, {horizon.value.lower()} h={HORIZON_SESSIONS[horizon]}, "
                    f"k_up={k_up} k_dn={k_dn}",
             horizon=horizon, k_up=k_up, k_dn=k_dn,
+            v_atr=round(mean_v_atr, 4),
         )
         self._cache[key] = est
         return est

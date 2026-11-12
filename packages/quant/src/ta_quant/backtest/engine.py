@@ -44,7 +44,7 @@ from ta_ledger.risk import (
 
 from ..barriers import BarrierModel, build_path_library, known_paths
 from ..factors.correlation import ResidualCorrelationIndex, compute_pair_correlations
-from ..regime import regime_on
+from ..regime import EntryBlock, regime_on
 from ..pipeline import (
     _BOOK_LEVEL_RULES,
     K_DN,
@@ -87,6 +87,10 @@ class BacktestResult:
     outcomes: list[dict[str, Any]]
     events: tuple[LedgerEvent, ...]
     stats: BacktestStats
+    #: The breadth regime on each session -- the one that set this run's caps
+    #: (and any breadth EntryBlock). Recorded so a chart can show what the
+    #: strategy actually saw, not the informational index regime.
+    regimes: dict = None  # type: ignore[assignment]
 
 
 def orders_from_recommendations(
@@ -197,6 +201,8 @@ def _screen_session(
     edge_estimator: EdgeEstimatorPort | None = None,
     calibrator: ProbabilityCalibratorPort | None = None,
     index_regime: pl.DataFrame | None = None,
+    entry_block: EntryBlock | None = None,
+    pending_symbols: set[str] | None = None,
 ) -> pl.DataFrame:
     """Screen candidates for session d using precomputed factor panel.
 
@@ -210,9 +216,10 @@ def _screen_session(
 
     market_breadth = breadth_row(panel, d, market_index, score_syms)
     regime, _ = infer_regime(market_breadth)
-    if index_regime is not None:
-        regime, _ = regime_on(index_regime, d)
-    entries_blocked = index_regime is not None and regime is Regime.TREND_DOWN
+    index_today = regime_on(index_regime, d)[0] if index_regime is not None else None
+    # Same rule, same inputs as pipeline.run_nightly: caps from breadth, an
+    # optional EntryBlock vetoes new entries only.
+    entries_blocked = entry_block is not None and entry_block.blocks(regime, index_today)
     caps = regime_caps(regime)
     new_cap = int(caps["new"])
 
@@ -245,7 +252,7 @@ def _screen_session(
     recs: list[dict[str, Any]] = []
     alternates: list[dict[str, Any]] = []
     pf = portfolio
-    owned_syms: set[str] = {p.symbol for p in portfolio.positions}
+    owned_syms: set[str] = {p.symbol for p in portfolio.positions} | (pending_symbols or set())
     new_entries_today = 0
 
     scored_syms = scored["symbol"].to_list()
@@ -503,12 +510,27 @@ def run_backtest(
     edge_estimator: EdgeEstimatorPort | None = None,
     calibrator: ProbabilityCalibratorPort | None = None,
     index_regime: pl.DataFrame | None = None,
+    entry_block: EntryBlock | None = None,
+    strategy_version: str = "v1",
+    use_pit_liquidity: bool = False,
 ) -> BacktestResult:
     """Execute historical backtest over daily bars without lookahead bias.
 
     Builds the trailing factor panel once, steps through sessions sequentially
     via PaperBroker, and computes deflated risk statistics.
     """
+    if strategy_version == "v2":
+        from ..challenger import run_backtest_v2 as v2_backtest
+        return v2_backtest(
+            bars, members,
+            start_date=start_date, end_date=end_date,
+            initial_equity=initial_equity, arm=arm,
+            tradeable_index=tradeable_index, scored_index=scored_index,
+            cfg=cfg, weights=None, n_trials=max(n_trials, 36),
+            warmup_sessions=warmup_sessions, index_regime=index_regime,
+            entry_block=entry_block, use_pit_liquidity=use_pit_liquidity,
+        )
+
     all_sessions = sorted(bars["d"].unique().to_list())
     if not all_sessions:
         raise ValueError("bars DataFrame has no session dates")
@@ -550,6 +572,8 @@ def run_backtest(
     trade_syms = set(members.filter(pl.col("index_name") == tradeable_index)["symbol"].to_list())
     configured_score_syms = set(members.filter(pl.col("index_name") == scored_index)["symbol"].to_list())
     score_syms = configured_score_syms or trade_syms
+    market_index = scored_index if configured_score_syms else tradeable_index
+    session_regimes: dict[date, str] = {}
 
     # Precompute industry trends once across the panel
     precomputed_ind_tr = industry_trends(panel, score_syms or trade_syms)
@@ -596,8 +620,12 @@ def run_backtest(
         # first. So it gets that session's rows, partitioned once up front,
         # instead of re-filtering the whole history every session (was ~40% of
         # a 1,250-session run). Partitioning keeps row order, so results match.
+        day_panel = day_panels.get((d,), empty_day)
+        # Same call _screen_session makes, on the same rows -- recorded for display.
+        session_regimes[d] = infer_regime(breadth_row(day_panel, d, market_index, score_syms))[0].value
+        pending_syms = {o.symbol for o in broker.pending_orders.values()} if broker.pending_orders else None
         recs_df = _screen_session(
-            day_panels.get((d,), empty_day),
+            day_panel,
             members,
             d=d,
             portfolio=broker.portfolio(),
@@ -612,6 +640,8 @@ def run_backtest(
             edge_estimator=edge_estimator,
             calibrator=calibrator,
             index_regime=index_regime,
+            entry_block=entry_block,
+            pending_symbols=pending_syms,
         )
 
         if not recs_df.is_empty():
@@ -642,4 +672,5 @@ def run_backtest(
         outcomes=broker.outcomes,
         events=tuple(broker.events),
         stats=stats,
+        regimes=session_regimes,
     )

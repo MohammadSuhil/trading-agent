@@ -18,12 +18,16 @@ __all__ = [
     "EXPECTED_V1_SHA256",
     "WEIGHTS_V1_PATH",
     "WEIGHTS_V1_SHA256",
+    "WEIGHTS_V2_PATH",
     "ScoringWeights",
+    "ChallengerWeights",
     "load_weights",
+    "load_challenger_weights",
     "verify_v1_integrity",
 ]
 
 WEIGHTS_V1_PATH: Path = Path(__file__).resolve().parents[4] / "config" / "weights.v1.json"
+WEIGHTS_V2_PATH: Path = Path(__file__).resolve().parents[4] / "config" / "weights.v2.json"
 
 
 def _compute_v1_sha256() -> str:
@@ -98,4 +102,70 @@ def verify_v1_integrity() -> bool:
         return bool(w and w.sha256 == WEIGHTS_V1_SHA256)
     except (OSError, ValueError, KeyError):
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class ChallengerWeights:
+    """Immutable challenger weights for v2 strategy."""
+
+    version: str
+    strategy_mode: str
+    horizon: str
+    rebalance_cadence: str
+    max_positions: int
+    hold_rank_buffer: int
+    pit_liquidity_top_n: int
+    initial_stop_pct: float
+    trail_activate_gain_pct: float
+    trail_drawdown_pct: float
+    target_multiple: float
+    entry_band_pct: float
+    sma_exit_window: int
+    max_pair_corr: float
+    min_mom_12_1: float
+    min_ret_126d: float
+    min_price: float
+    stop_atr: float
+    target_atr: float
+    min_expectancy_atr: float
+    composite_weights: dict
+    sha256: str
+
+
+def load_challenger_weights(
+    path: Path = WEIGHTS_V2_PATH,
+) -> ChallengerWeights:
+    """Load v2 challenger weights from JSON."""
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"weights file not found: {p}")
+
+    raw = p.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    data = json.loads(raw.decode("utf-8"))
+
+    return ChallengerWeights(
+        version=str(data["version"]),
+        strategy_mode=str(data["strategy_mode"]),
+        horizon=str(data["horizon"]),
+        rebalance_cadence=str(data["rebalance_cadence"]),
+        max_positions=int(data["max_positions"]),
+        hold_rank_buffer=int(data["hold_rank_buffer"]),
+        pit_liquidity_top_n=int(data["pit_liquidity_top_n"]),
+        initial_stop_pct=float(data["initial_stop_pct"]),
+        trail_activate_gain_pct=float(data["trail_activate_gain_pct"]),
+        trail_drawdown_pct=float(data["trail_drawdown_pct"]),
+        target_multiple=float(data["target_multiple"]),
+        entry_band_pct=float(data["entry_band_pct"]),
+        sma_exit_window=int(data["sma_exit_window"]),
+        max_pair_corr=float(data["max_pair_corr"]),
+        min_mom_12_1=float(data["min_mom_12_1"]),
+        min_ret_126d=float(data["min_ret_126d"]),
+        min_price=float(data["min_price"]),
+        stop_atr=float(data["stop_atr"]),
+        target_atr=float(data["target_atr"]),
+        min_expectancy_atr=float(data["min_expectancy_atr"]),
+        composite_weights=dict(data["composite_weights"]),
+        sha256=digest,
+    )
 

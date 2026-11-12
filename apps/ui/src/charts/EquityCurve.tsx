@@ -20,10 +20,18 @@ type Point = {
   benchPy?: number;
   cmpVal?: number;
   cmpPy?: number;
+  /** Breadth regime -- the one that set the strategy's caps that day. */
   regime?: string;
+  /** Index regime -- information only (and the comparison line's block source). */
+  indexRegime?: string;
 };
 
-export type ComparisonPoint = { d?: string | null; equity?: number | null; regime?: string | null };
+export type ComparisonPoint = {
+  d?: string | null;
+  equity?: number | null;
+  regime?: string | null;
+  index_regime?: string | null;
+};
 
 const REGIME_WORD: Record<string, string> = {
   TREND_UP: 'bull', TREND_DOWN: 'bear', CHOP: 'sideways', HIGH_VOL: 'high volatility', UNKNOWN: 'not yet measurable',
@@ -85,11 +93,9 @@ export function EquityCurve({
     }
   });
 
-  const cmpByDate = new Map<string, { equity: number; regime?: string }>();
+  const cmpByDate = new Map<string, { equity: number }>();
   (comparisonCurve ?? []).forEach((c) => {
-    if (typeof c.d === 'string' && isNum(c.equity)) {
-      cmpByDate.set(c.d, { equity: c.equity, regime: typeof c.regime === 'string' ? c.regime : undefined });
-    }
+    if (typeof c.d === 'string' && isNum(c.equity)) cmpByDate.set(c.d, { equity: c.equity });
   });
 
   const e0 = first.equity;
@@ -119,6 +125,7 @@ export function EquityCurve({
   const sy = (v: number) => M.top + (1 - (v - y0) / (y1 - y0 || 1)) * h;
 
   const points: Point[] = validEquity.map((p, i) => {
+    const ep = p as EquityPoint & { regime?: string | null; index_regime?: string | null };
     const pt: Point = {
       i,
       d: p.d,
@@ -127,6 +134,8 @@ export function EquityCurve({
       heat_pct: p.heat_pct,
       px: sx(i),
       py: sy(p.equity),
+      regime: typeof ep.regime === 'string' ? ep.regime : undefined,
+      indexRegime: typeof ep.index_regime === 'string' ? ep.index_regime : undefined,
     };
     if (canRebaseBench) {
       const bc = benchByDate.get(p.d);
@@ -140,7 +149,6 @@ export function EquityCurve({
     if (c) {
       pt.cmpVal = c.equity;
       pt.cmpPy = sy(c.equity);
-      pt.regime = c.regime;
     }
     return pt;
   });
@@ -340,6 +348,11 @@ export function EquityCurve({
                   Heat: {pctFrac(hover.heat_pct)}
                 </div>
               )}
+              {hover.regime && (
+                <div className="text-[11px] text-ink2">
+                  Market regime (sets limits): <b>{REGIME_WORD[hover.regime] ?? hover.regime.toLowerCase()}</b>
+                </div>
+              )}
               {hover.cmpVal !== undefined && (
                 <div className="tnum mt-1 border-t border-line pt-1">
                   <div className="font-semibold" style={{ color: t.warning }}>
@@ -349,12 +362,14 @@ export function EquityCurve({
                     vs {L.primary.toLowerCase()}: {hover.cmpVal - hover.equity >= 0 ? '+' : '−'}
                     {inr(Math.abs(hover.cmpVal - hover.equity))}
                   </div>
-                  {hover.regime && (
-                    <div className="text-[11px] text-muted">
-                      Index regime: {REGIME_WORD[hover.regime] ?? hover.regime.toLowerCase()}
-                      {hover.regime === 'TREND_DOWN' ? ' — new buys blocked on this line' : ''}
-                    </div>
+                  {hover.indexRegime === 'TREND_DOWN' && (
+                    <div className="text-[11px] text-muted">index bear — new buys blocked on this line</div>
                   )}
+                </div>
+              )}
+              {hover.indexRegime && (
+                <div className="mt-1 text-[11px] text-muted">
+                  Index regime (information only): {REGIME_WORD[hover.indexRegime] ?? hover.indexRegime.toLowerCase()}
                 </div>
               )}
               {hover.benchVal !== undefined && (

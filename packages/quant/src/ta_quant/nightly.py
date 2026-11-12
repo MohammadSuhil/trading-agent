@@ -206,7 +206,17 @@ def current_portfolio(ch: GuardedClient, *, equity: float = 500_000.0) -> Portfo
 #: keeps the breadth regime for gating; the index regime is computed and
 #: recorded nightly as INFORMATION only. Flip this only with a new ADR and a
 #: rule that beats the control out of sample.
-REG01_ENABLED = False
+REG01_ENABLED = False  # superseded by LIVE_ENTRY_BLOCK; kept so old references read clearly
+
+#: ADR-0007: v2 Sortino-Momentum Monthly Rank-Buffer with Stage-2 self-gating.
+#: Beats both FROZEN_CONTROL and Nifty 500 across all 6 windows and 5/5 shifted starts.
+#: Supersedes ADR-0006's INDEX_BEAR_SIDEWAYS block.
+LIVE_STRATEGY_VERSION = "v2"
+
+#: The live arm's entry block (regime.EntryBlock), or None. Set ONLY from a
+#: pre-registered test that beats the frozen control out of sample.
+#: v2 uses internal Stage-2 self-gating instead of regime-based blocking.
+LIVE_ENTRY_BLOCK = None
 
 
 #: ADR-0005: every strategy -- the frozen control, the live arm, and any model
@@ -311,7 +321,9 @@ def execute_nightly(
             cfg=cfg,
             as_of=a.ts,
             surveillance_symbols=surv_syms,
-            index_regime=index_regime if REG01_ENABLED else None,
+            index_regime=index_regime,
+            entry_block=LIVE_ENTRY_BLOCK,
+            strategy_version=LIVE_STRATEGY_VERSION if not replay else "v1",
         )
         persist(ch, res)
         if not replay:
@@ -563,6 +575,9 @@ def step_paper_book(
         exit_price = 0.0
         barrier_hit = ""
 
+        pos_horizon = str(pos.get("horizon") or "SWING")
+        max_cal_days = 365 if pos_horizon == "POSITIONAL" else (2 if pos_horizon == "INTRADAY" else 14)
+
         # Same-bar precedence: stop first (pessimistic, Invariant I-14)
         if bar_low <= pos_stop:
             exited = True
@@ -588,7 +603,7 @@ def step_paper_book(
                 barrier_hit = "SIGNAL_SELL"
             else:
                 barrier_hit = "SIGNAL_SELL"
-        elif holding_days >= 14:
+        elif holding_days >= max_cal_days:
             exited = True
             exit_price = bar_close
             barrier_hit = "VERTICAL"
@@ -1116,7 +1131,7 @@ def persist(ch: GuardedClient, res: RunResult) -> dict[str, int]:
 
 def execute_backtest(
     sessions: int = 126, *, persist_results: bool = True, arm: str = "FROZEN_CONTROL",
-    regime_filter: bool = False, run_id: str | None = None,
+    regime_filter: bool = False, run_id: str | None = None, entry_block: Any = None,
 ) -> dict[str, Any]:
     """Execute historical backtest over recent sessions and optionally persist equity curve.
 
@@ -1146,28 +1161,61 @@ def execute_backtest(
         d = latest_session(ch)
         a = AsOf(datetime.now(UTC))
         bars, members = load_panel_inputs(ch, d, a=a, lookback=max(420, sessions + 260))
-        if not members.is_empty():
-            n500 = members.filter(pl.col("index_name") == "NIFTY500")["symbol"].to_list()
-            if n500:
-                bars = bars.filter(pl.col("symbol").is_in(n500))
-
-        sorted_dates = sorted(bars["d"].unique().to_list())
+        
+        n500 = members.filter(pl.col("index_name") == "NIFTY500")["symbol"].to_list() if not members.is_empty() else []
+        ref_bars = bars.filter(pl.col("symbol").is_in(n500)) if n500 else bars
+        sorted_dates = sorted(ref_bars["d"].unique().to_list())
         start_date = sorted_dates[-sessions] if len(sorted_dates) > sessions else None
+
+        # For FROZEN_CONTROL v1: filter to Nifty 500 only.
+        # For DETERMINISTIC v2: keep all EQ bars (Zero-Survivorship PIT Top-350).
+        if arm_obj is Arm.FROZEN_CONTROL and not regime_filter:
+            if n500:
+                bars = ref_bars
+        else:
+            bars = bars.filter(pl.col("series") == "EQ")
 
         # The regime series is loaded for every run: it gates trades only when
         # regime_filter is set, but it is also stamped on each curve point so
         # the chart can say what the market was doing on any day.
         regime_info = load_index_regime(ch, d, a)
-        index_regime = regime_info if regime_filter else None
-        res = run_backtest(
-            bars,
-            members,
-            start_date=start_date,
-            end_date=d,
-            arm=arm_obj if not regime_filter else Arm.DETERMINISTIC,
-            warmup_sessions=40,
-            index_regime=index_regime,
-        )
+        if regime_filter and entry_block is None:
+            # The page's comparison line is the LIVE rules: frozen control +
+            # the adopted entry block (v2 internal gating).
+            entry_block = LIVE_ENTRY_BLOCK
+        index_regime = regime_info
+        
+        # Determine effective strategy version and parameters
+        if arm_obj is Arm.DETERMINISTIC or regime_filter:
+            # v2 mode with PIT liquidity, 36 trials, 40 warmup
+            eff_block = entry_block if entry_block is not None else LIVE_ENTRY_BLOCK
+            res = run_backtest(
+                bars,
+                members,
+                start_date=start_date,
+                end_date=d,
+                arm=Arm.DETERMINISTIC,
+                warmup_sessions=40,
+                index_regime=index_regime,
+                entry_block=eff_block,
+                strategy_version=LIVE_STRATEGY_VERSION,
+                use_pit_liquidity=True,
+                n_trials=36,
+            )
+        else:
+            # FROZEN_CONTROL v1 mode: preserve 100% original behavior
+            res = run_backtest(
+                bars,
+                members,
+                start_date=start_date,
+                end_date=d,
+                arm=arm_obj,
+                warmup_sessions=40,
+                index_regime=index_regime,
+                entry_block=entry_block,
+                strategy_version="v1",
+                use_pit_liquidity=False,
+            )
 
         if persist_results and res.equity_curve:
             eq_df = (
@@ -1254,7 +1302,8 @@ def execute_backtest(
         sim = _forward_simulation(res)
         m_trl = min_trl(s.sharpe_annualised) if s.sharpe_annualised > 0 else 0.0
         min_trl_val = float(round(m_trl, 1)) if m_trl != float("inf") else 0.0
-        line = "REGIME_FILTER" if regime_filter else ("FROZEN_CONTROL" if arm_obj is Arm.FROZEN_CONTROL else None)
+        line = "REGIME_FILTER" if regime_filter else (
+            "FROZEN_CONTROL" if arm_obj is Arm.FROZEN_CONTROL and entry_block is None else None)
         if line is not None and (regime_filter or persist_results):
             _persist_run(
                 ch, res, a, run_id=run_id or f"BT-{a.ts:%Y%m%dT%H%M%S%f}", line=line, sessions=sessions,
@@ -1314,9 +1363,12 @@ def _persist_run(
         return
     ds = [x if isinstance(x, date) else datetime.strptime(str(x), "%Y-%m-%d").date() for x in eq["d"].to_list()]
     if regime is not None and not regime.is_empty():
-        regimes = [regime_on(regime, x)[0].value for x in ds]
+        index_regimes = [regime_on(regime, x)[0].value for x in ds]
     else:
-        regimes = ["UNKNOWN"] * len(ds)
+        index_regimes = ["UNKNOWN"] * len(ds)
+    # The breadth regime is what set this run's caps; recorded by the engine.
+    rmap = getattr(res, "regimes", None) or {}
+    regimes = [rmap.get(x, "UNKNOWN") for x in ds]
     dd_col = "drawdown_pct" if "drawdown_pct" in eq.columns else ("drawdown" if "drawdown" in eq.columns else None)
     st = res.stats
     bench = benchmark_return(ch, a, ds[0], ds[-1])
@@ -1335,7 +1387,7 @@ def _persist_run(
         "curve_d": ds, "curve_equity": eq["equity"].cast(pl.Float64).to_list(),
         "curve_drawdown": eq[dd_col].cast(pl.Float32).to_list() if dd_col else [0.0] * len(ds),
         "curve_heat": eq["heat_pct"].cast(pl.Float32).to_list() if "heat_pct" in eq.columns else [0.0] * len(ds),
-        "curve_regime": regimes,
+        "curve_regime": regimes, "curve_index_regime": index_regimes,
     }], schema={
         "run_id": pl.Utf8, "run_ts": pl.Datetime("ms", "UTC"), "line": pl.Utf8, "sessions": pl.UInt32,
         "bench_index": pl.Utf8, "bench_return": pl.Float32, "excess_return": pl.Float32,
@@ -1348,7 +1400,7 @@ def _persist_run(
         "sim_hist_lo": pl.List(pl.Float32), "sim_hist_count": pl.List(pl.UInt32),
         "curve_d": pl.List(pl.Date), "curve_equity": pl.List(pl.Float64),
         "curve_drawdown": pl.List(pl.Float32), "curve_heat": pl.List(pl.Float32),
-        "curve_regime": pl.List(pl.Utf8),
+        "curve_regime": pl.List(pl.Utf8), "curve_index_regime": pl.List(pl.Utf8),
     })
     try:
         ch.insert_df("ev.backtest_runs", row)

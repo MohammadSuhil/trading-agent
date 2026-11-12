@@ -273,6 +273,15 @@ P(target hit), P(stop hit), P(time-stop) -- the most dangerous numbers here.
 - `class BarrierModel` -- `estimate_barriers` for one library, computed once per cell.
   - `estimate(self, atr_pct: float | None=None) -> BarrierEstimate`
 
+### `packages/quant/src/ta_quant/challenger.py`
+
+V2 Challenger Strategy (ADR-0007): Sortino Risk-Adjusted Momentum with Monthly Rank-Buffer.
+
+- `monthly_rebalance_dates(sessions: Sequence[date]) -> set[date]` -- Return the first observed session of each `(year, month)` across sorted sessions.
+- `score_universe_v2(day_panel: pl.DataFrame, *, tradeable: set[str] | None=None, cfg: RiskConfig=DEFAULT, weights: ChallengerWeights | None=None, use_pit_liqui...` -- Cross-sectional Sortino-momentum ranking with hard liquidity/price gates.
+- `screen_session_v2(day_panel: pl.DataFrame, *, d: date, portfolio: Portfolio, is_rebalance_day: bool=True, tradeable: set[str] | None=None, use_pit_liquidity:...` -- Produce live recommendation cards matching `pipeline.run_nightly` schema.
+- `run_backtest_v2(bars: pl.DataFrame, members: pl.DataFrame, *, start_date: date | None=None, end_date: date | None=None, initial_equity: float=500000.0, arm: ...` -- Execute v2 Sortino-Momentum Monthly Rank-Buffer backtest via `PaperBroker`.
+
 ### `packages/quant/src/ta_quant/factors/correlation.py`
 
 Pairwise Residual Correlation for RISK-08.
@@ -302,7 +311,7 @@ Database I/O for the nightly run. The pipeline itself stays pure.
 - `resolve_past_recommendations(ch: GuardedClient, bars: pl.DataFrame, d: date, as_of: datetime) -> int` -- Evaluate past BUY and WATCH recommendations against historical paths to record outcomes.
 - `step_paper_book(ch: GuardedClient, res: RunResult, bars: pl.DataFrame, *, auto_buy: bool=True) -> None` -- Advance the paper trading book: mark MTM, resolve exits on daily bars,
 - `persist(ch: GuardedClient, res: RunResult) -> dict[str, int]` -- Write the run's outputs. Each table is independent, so one failure does
-- `execute_backtest(sessions: int=126, *, persist_results: bool=True, arm: str='FROZEN_CONTROL', regime_filter: bool=False, run_id: str | None=None) -> dict[str...` -- Execute historical backtest over recent sessions and optionally persist equity curve.
+- `execute_backtest(sessions: int=126, *, persist_results: bool=True, arm: str='FROZEN_CONTROL', regime_filter: bool=False, run_id: str | None=None, entry_block...` -- Execute historical backtest over recent sessions and optionally persist equity curve.
 
 ### `packages/quant/src/ta_quant/pipeline.py`
 
@@ -325,6 +334,9 @@ Index-based market regime: deterministic rules on the benchmark index (ADR-0004)
 - `apply_hysteresis(raw: list[Regime], *, loosen_after: int=LOOSEN_AFTER) -> list[Regime]` -- RISK-26: tighten on the first session; loosen only after `loosen_after`.
 - `regime_series(index_bars: pl.DataFrame, *, index_name: str=REGIME_INDEX) -> pl.DataFrame` -- Per-session regime for one index, strictly trailing, with hysteresis.
 - `regime_on(series: pl.DataFrame, d: date) -> tuple[Regime, str]` -- The regime in force at the close of `d` (latest row at or before d).
+- `class EntryBlock` -- One rule: no NEW long while `source`'s regime is in `regimes`.
+  - `blocks(self, breadth: Regime, index: Regime | None) -> bool`
+  - `describe(self) -> str`
 
 ### `packages/quant/src/ta_quant/stats.py`
 
@@ -356,6 +368,8 @@ Frozen Control Scoring Weights (Milestone M2.13, Invariant P-04).
 - `class ScoringWeights` -- Immutable scoring and geometric thresholds for candidate generation.
 - `load_weights(path: Path=WEIGHTS_V1_PATH, *, verify_v1: bool=True) -> ScoringWeights` -- Load scoring weights from JSON, optionally enforcing Invariant P-04 immutability.
 - `verify_v1_integrity() -> bool` -- Verify weights.v1.json exists and its SHA-256 matches WEIGHTS_V1_SHA256.
+- `class ChallengerWeights` -- Immutable challenger weights for v2 strategy.
+- `load_challenger_weights(path: Path=WEIGHTS_V2_PATH) -> ChallengerWeights` -- Load v2 challenger weights from JSON.
 
 ## packages/ledger
 
@@ -387,6 +401,7 @@ PaperBroker and deterministic fill simulation.
   - `record_manifest(self, manifest: RunManifest) -> LedgerEvent` -- Record the genesis or execution manifest into the event chain.
   - `place_orders(self, orders: Sequence[Order], *, run_id: str, ts: datetime) -> list[LedgerEvent]` -- Stage pending orders for execution in subsequent sessions.
   - `trail_stop(self, order_id: str, new_stop: float, *, run_id: str, ts: datetime) -> LedgerEvent` -- Trail the protective stop of an open position upwards.
+  - `schedule_exit(self, order_id: str, *, reason: str='SIGNAL_EXIT') -> None` -- Schedule an exit for an open position.
   - `step_session(self, d: date, bars_by_symbol: Mapping[str, BarData], *, run_id: str, ts: datetime) -> list[LedgerEvent]` -- Advance one trading session: evaluate entries, exits, lot marks, and equity.
   - `portfolio(self) -> Portfolio` -- Construct the live Portfolio snapshot from current lots and cash.
 

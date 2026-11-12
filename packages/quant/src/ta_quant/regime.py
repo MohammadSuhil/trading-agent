@@ -1,12 +1,11 @@
 """Index-based market regime: deterministic rules on the benchmark index (ADR-0004).
 
-**Status: recorded nightly as information; NOT a trade gate.** It was built to
-replace the breadth heuristic (`pipeline.infer_regime`) as the live arm's gate,
-with REG-01 blocking new longs in BEAR. Tested out of sample before adoption,
-it LOST to the control: the death-cross BEAR state fires after a fall has
-happened, so it blocks the recovery (BEAR sessions 2019-2025 were followed by
-+1.9% mean 10-session index return vs +0.4% in BULL). It stays as a research
-switch (`ta backtest --regime-filter`) and as the dashboard's index reading.
+**Status (ADR-0006, 2026-11-12): gates NEW entries in the live arm.** Caps still
+follow the breadth regime (`pipeline.infer_regime`); the live arm's EntryBlock
+(`nightly.LIVE_ENTRY_BLOCK = INDEX_BEAR_SIDEWAYS`) vetoes new buys while this
+index regime is bear or sideways. ADR-0004 had rejected a bear-only block; on
+the corrected engine and with 5 start dates per period it beat the control.
+The frozen control never takes a block.
 
 The rules, on the Nifty 500 index (the universe we trade, so its regime is
 the one our candidates live in), evaluated at each session's close and using
@@ -35,6 +34,7 @@ ADR for the out-of-sample check that was run before adopting them.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import date
 
 import polars as pl
@@ -157,3 +157,42 @@ def regime_on(series: pl.DataFrame, d: date) -> tuple[Regime, str]:
     if row.is_empty():
         return Regime.UNKNOWN, "no index history at or before this session"
     return Regime(row["regime"][0]), f"{REGIME_INDEX}: {row['note'][0]}"
+
+
+@dataclass(frozen=True)
+class EntryBlock:
+    """One rule: no NEW long while `source`'s regime is in `regimes`.
+
+    It changes exactly one thing. Position/heat caps always come from the
+    strategy's own breadth regime (`pipeline.infer_regime`); an EntryBlock only
+    adds a veto on new entries. (The first REG-01 implementation also swapped
+    the caps to the index regime, so a test of it changed two things at once.)
+    Exits are never affected. An index regime still in warm-up (UNKNOWN) does
+    not block: an unmeasured market is not evidence of a bear one.
+
+    >>> b = EntryBlock("BREADTH", frozenset({Regime.TREND_DOWN, Regime.CHOP}), "test")
+    >>> b.blocks(Regime.CHOP, None), b.blocks(Regime.TREND_UP, Regime.TREND_DOWN)
+    (True, False)
+    >>> EntryBlock("INDEX", frozenset({Regime.TREND_DOWN}), "t").blocks(Regime.TREND_UP, Regime.UNKNOWN)
+    False
+    """
+
+    source: str                    # "BREADTH" | "INDEX"
+    regimes: frozenset[Regime]
+    label: str
+
+    def blocks(self, breadth: Regime, index: Regime | None) -> bool:
+        r = breadth if self.source == "BREADTH" else index
+        return r is not None and r is not Regime.UNKNOWN and r in self.regimes
+
+    def describe(self) -> str:
+        names = "/".join(sorted(x.value for x in self.regimes))
+        return f"{self.label}: no new buys while the {self.source.lower()} regime is {names}"
+
+
+#: The pre-registered candidates (2026-11-12). V0 is "no EntryBlock".
+INDEX_BEAR = EntryBlock("INDEX", frozenset({Regime.TREND_DOWN}), "V1 index bear")
+INDEX_BEAR_SIDEWAYS = EntryBlock("INDEX", frozenset({Regime.TREND_DOWN, Regime.CHOP}), "V2 index bear+sideways")
+BREADTH_DOWN = EntryBlock("BREADTH", frozenset({Regime.TREND_DOWN}), "V3 breadth down")
+BREADTH_DOWN_SIDEWAYS = EntryBlock("BREADTH", frozenset({Regime.TREND_DOWN, Regime.CHOP}), "V4 breadth down+sideways")
+CANDIDATES = (INDEX_BEAR, INDEX_BEAR_SIDEWAYS, BREADTH_DOWN, BREADTH_DOWN_SIDEWAYS)

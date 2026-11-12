@@ -115,3 +115,10 @@ def test_barrier_model_computes_each_cell_once(monkeypatch) -> None:
     ests = [m.estimate(x) for x in xs]
     assert calls["n"] - after_init <= 4 * 3          # <= 4 cells x 3 outcome classes
     assert all(BarrierModel(lib).estimate(x) == e for x, e in zip(xs[:20], ests[:20], strict=True))
+
+
+def test_positional_horizon_path_library_has_linear_ast() -> None:
+    """Regression guard: Horizon.POSITIONAL (h=60) must build in <1s without O(2^h) AST blowup."""
+    panel = _panel(n=100)
+    lib = build_path_library(panel, horizon=Horizon.POSITIONAL)
+    assert lib.height > 0

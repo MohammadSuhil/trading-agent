@@ -6,7 +6,7 @@ from datetime import date, timedelta
 import polars as pl
 import pytest
 from ta_core.enums import Regime
-from ta_quant.regime import LOOSEN_AFTER, REGIME_INDEX, regime_on, regime_series
+from ta_quant.regime import INDEX_BEAR, LOOSEN_AFTER, REGIME_INDEX, regime_on, regime_series
 
 
 def _index(closes: list[float]) -> pl.DataFrame:
@@ -89,7 +89,7 @@ def test_bear_block_opens_no_new_position() -> None:
 
     control = run_backtest(bars, members, start_date=start, end_date=d, arm=Arm.FROZEN_CONTROL)
     blocked = run_backtest(bars, members, start_date=start, end_date=d, arm=Arm.DETERMINISTIC,
-                           index_regime=bear)
+                           index_regime=bear, entry_block=INDEX_BEAR)
     assert len(control.outcomes) > 0, "window has no qualifying trades; test proves nothing"
     assert len(blocked.outcomes) == 0
     assert all(abs(e - 500_000.0) < 1e-6 for e in
@@ -126,9 +126,31 @@ def test_live_pipeline_bear_block_downgrades_every_buy(monkeypatch) -> None:
     days = sorted(bars["d"].unique().to_list())
     bear = pl.DataFrame({"d": days, "regime": [Regime.TREND_DOWN.value] * len(days),
                          "note": ["forced bear"] * len(days)})
-    blocked = pipeline.run_nightly(bars, members, d=d, portfolio=pf, index_regime=bear)
+    blocked = pipeline.run_nightly(bars, members, d=d, portfolio=pf, index_regime=bear, entry_block=INDEX_BEAR)
     recs = blocked.recommendations
-    assert blocked.regime is Regime.TREND_DOWN
+    # The block vetoes entries only: the caps (and the reported regime) are still
+    # the breadth regime's -- the earlier REG-01 also swapped them, so a test of
+    # it changed two things at once.
+    assert blocked.regime is free.regime
     assert recs.filter(pl.col("action") == "BUY").height == 0
     assert (recs["qty"] == 0).all() and (recs["notional"] == 0).all()
-    assert recs["barrier_reason"].str.contains("REG-01").any()
+    assert recs["barrier_reason"].str.contains("ENTRY-BLOCK").any()
+
+    # A BREADTH block keyed on the regime the breadth heuristic reports today
+    # must block too -- the same EntryBlock path, the other source.
+    from ta_quant.regime import EntryBlock
+    breadth_block = EntryBlock("BREADTH", frozenset({free.regime}), "test: today's breadth regime")
+    b2 = pipeline.run_nightly(bars, members, d=d, portfolio=pf, entry_block=breadth_block)
+    assert b2.recommendations.filter(pl.col("action") == "BUY").height == 0
+
+
+def test_live_strategy_is_adr_0007_v2_challenger() -> None:
+    """The live arm's strategy must be v2 with internal Stage-2 self-gating.
+
+    Changing it is a strategy change: it needs a new ADR and a new test, not an
+    edit to one constant. The frozen control never takes a strategy override (I-24).
+    """
+    from ta_quant import nightly
+
+    assert nightly.LIVE_STRATEGY_VERSION == "v2"
+    assert nightly.LIVE_ENTRY_BLOCK is None

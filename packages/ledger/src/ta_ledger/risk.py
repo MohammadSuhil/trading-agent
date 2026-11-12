@@ -325,8 +325,11 @@ def evaluate_entry(
     notional = risk_rupees / c.stop_distance_pct
     resized = False
 
-    if notional > min(cfg.max_notional, pf.equity * caps["name"]):
-        notional = min(cfg.max_notional, pf.equity * caps["name"])
+    eq_scale = max(1.0, pf.equity / cfg.equity_base) if cfg.equity_base > 0 else 1.0
+    eff_max_notional = cfg.max_notional * eq_scale
+    name_ceiling = min(eff_max_notional, pf.equity * caps["name"])
+    if notional > name_ceiling:
+        notional = name_ceiling
         resized = True
 
     # ---------------------------------------------------------- RISK-06

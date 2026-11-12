@@ -22,7 +22,7 @@ FACTOR_COLUMNS = [
     "ret_1d", "ret_5d", "ret_21d", "ret_63d", "ret_126d", "ret_252d", "mom_12_1",
     "sma20", "sma50", "sma200", "ma_stack", "atr14", "realised_vol_21d",
     "rsi14", "adx14", "bb_z", "dist_52w_high", "dist_52w_low",
-    "rvol_20", "adtv_20",
+    "rvol_20", "adtv_20", "dvol_252", "adtv_126",
     # --- 1. Returns & Multi-Horizon Momentum (10 new)
     "ret_2d", "ret_3d", "ret_10d", "ret_42d", "mom_3_1", "mom_6_1",
     "overnight_ret_1d", "intraday_ret_1d", "overnight_ret_21d", "intraday_ret_21d",
@@ -97,6 +97,12 @@ def add_price_factors(df: pl.DataFrame) -> pl.DataFrame:
         .then(pl.col("volume") / pl.col("volume").rolling_mean(5).over(s))
         .otherwise(0.0)
         .alias("rvol_5"),
+        # Downside volatility (dvol_252): annualised downside semideviation of log returns
+        (((pl.col("close") / pl.col("close").shift(1).over(s)).log().clip(upper_bound=0.0)) ** 2)
+        .rolling_mean(252).over(s).sqrt().mul(252 ** 0.5)
+        .alias("dvol_252"),
+        # ADTV 126-session
+        pl.col("turnover").rolling_mean(126).over(s).alias("adtv_126"),
         pl.when(pl.col("volume").rolling_mean(20).over(s).is_null())
         .then(None)
         .when(pl.col("volume").rolling_mean(20).over(s) > 0)

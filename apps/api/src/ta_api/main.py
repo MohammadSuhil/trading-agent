@@ -272,13 +272,9 @@ def context() -> dict:
 
 
 def _live_regime(ch, a, d, breadth: dict) -> tuple[Regime, str]:
-    """The regime that GATES trades (breadth) plus the index regime as information.
-
-    ADR-0004 tested the index rules as a gate and rejected them, so gating
-    stays on the breadth heuristic -- the same function the nightly uses. The
-    nightly still records the index regime (md.regime_daily); it is appended
-    to the note, labelled informational, so the dashboard never presents a
-    regime that did not actually gate anything as if it had.
+    """The breadth regime (sets the caps) plus the index regime and whether it is
+    blocking new buys under the live entry block (ADR-0006), read from the
+    regime the nightly recorded (md.regime_daily) -- never re-derived here.
     """
     regime, note = _regime_from_breadth(breadth)
     try:
@@ -287,7 +283,13 @@ def _live_regime(ch, a, d, breadth: dict) -> tuple[Regime, str]:
     except Exception:  # noqa: BLE001
         r = []
     if r:
-        note = f"{note} · Nifty 500 index rules (informational, not gating): {humanize_regime(r[0]['regime'])}"
+        from ta_core.enums import Regime as _R
+        from ta_quant.nightly import LIVE_ENTRY_BLOCK
+        idx = _R(r[0]["regime"])
+        blocked = LIVE_ENTRY_BLOCK is not None and LIVE_ENTRY_BLOCK.blocks(regime, idx)
+        note = (f"{note} · Nifty 500 index regime: {humanize_regime(r[0]['regime'])}"
+                + (" — new buys BLOCKED (ADR-0006: no new buys while the index is bear or sideways)"
+                   if blocked else " — new buys allowed"))
     return regime, note
 
 
@@ -942,7 +944,8 @@ _RUN_COLS = (
     "final_equity, total_return, sharpe, psr, dsr, min_trl, win_rate, max_drawdown, "
     "bench_index, bench_return, excess_return, "
     "sim_status, sim_horizon, sim_block_len, sim_n_paths, sim_p_lo, sim_p_hi, sim_p_loss, "
-    "sim_hist_lo, sim_hist_count, curve_d, curve_equity, curve_drawdown, curve_heat, curve_regime"
+    "sim_hist_lo, sim_hist_count, curve_d, curve_equity, curve_drawdown, curve_heat, curve_regime, "
+    "curve_index_regime"
 )
 
 
@@ -1015,10 +1018,14 @@ def backtest(sessions: int | None = None) -> dict:
                          "No backtest has been run yet."),
             }
 
+        # regime = breadth (it set the caps); index_regime = information only.
+        # Runs stored before the index column existed have it empty.
+        idx_reg = run["curve_index_regime"] or [None] * len(run["curve_d"])
         curve = [
-            {"d": str(d_), "arm": "FROZEN_CONTROL", "equity": e_, "drawdown_pct": dd_, "heat_pct": h_, "regime": g_}
-            for d_, e_, dd_, h_, g_ in zip(run["curve_d"], run["curve_equity"], run["curve_drawdown"],
-                                           run["curve_heat"], run["curve_regime"], strict=True)
+            {"d": str(d_), "arm": "FROZEN_CONTROL", "equity": e_, "drawdown_pct": dd_, "heat_pct": h_,
+             "regime": g_, "index_regime": ig_}
+            for d_, e_, dd_, h_, g_, ig_ in zip(run["curve_d"], run["curve_equity"], run["curve_drawdown"],
+                                                run["curve_heat"], run["curve_regime"], idx_reg, strict=True)
         ]
         lo, hi = run["start_d"], run["end_d"]
         bm_rows: list[dict] = []
@@ -1050,8 +1057,9 @@ def backtest(sessions: int | None = None) -> dict:
                     "final_equity": v["final_equity"], "total_return_pct": v["total_return"],
                     "sharpe": v["sharpe"], "max_drawdown": v["max_drawdown"], "win_rate": v["win_rate"],
                     "excess_return_pct": v["excess_return"],
-                    "curve": [{"d": str(d_), "equity": e_, "regime": g_} for d_, e_, g_ in
-                              zip(v["curve_d"], v["curve_equity"], v["curve_regime"], strict=True)] if same else [],
+                    "curve": [{"d": str(d_), "equity": e_, "regime": g_, "index_regime": ig_} for d_, e_, g_, ig_ in
+                              zip(v["curve_d"], v["curve_equity"], v["curve_regime"],
+                                  v["curve_index_regime"] or [None] * len(v["curve_d"]), strict=True)] if same else [],
                 }
         except Exception:  # noqa: BLE001
             cmp = None

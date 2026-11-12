@@ -56,8 +56,8 @@ from ta_ledger.risk import (
 )
 
 from .barriers import BarrierModel, build_path_library, known_paths
-from .regime import regime_on
-from .factors.correlation import compute_pair_correlations
+from .regime import EntryBlock, regime_on
+from .factors.correlation import ResidualCorrelationIndex, compute_pair_correlations
 from .factors.price import add_price_factors
 from .trend import add_trend_states
 
@@ -433,13 +433,16 @@ def run_nightly(
     edge_estimator: EdgeEstimatorPort | None = None,
     calibrator: ProbabilityCalibratorPort | None = None,
     index_regime: pl.DataFrame | None = None,
+    entry_block: EntryBlock | None = None,
+    strategy_version: str = "v1",
 ) -> RunResult:
     """Produce the night's ranked trade plans and the rejection log.
 
-    `index_regime` (from `regime.regime_series`) switches the regime from the
-    breadth heuristic to the index rules and arms REG-01, the bear block. It is
-    passed only for research backtests and when `nightly.REG01_ENABLED` -- which
-    is False: ADR-0004 tested it out of sample and it lost to the control.
+    Caps always follow the breadth regime (`infer_regime`). `entry_block`
+    (regime.EntryBlock) optionally vetoes NEW entries while its source regime
+    -- breadth, or the index regime read from `index_regime` -- is in its set.
+    The live arm passes `nightly.LIVE_ENTRY_BLOCK`; research backtests pass
+    candidates; the frozen control never passes one.
 
     `as_of` is the decision instant and is RECORDED, never re-derived: a replay
     in 2027 must stamp the instant the decision was actually made, not the one
@@ -478,13 +481,14 @@ def run_nightly(
         if row
     }
     regime, regime_note = infer_regime(market_breadth)
-    if index_regime is not None:
-        regime, regime_note = regime_on(index_regime, d)
-    # REG-01: in an index BEAR regime no new long is opened -- not paced, not
-    # rotated into, not offered as a manual buy. Exits are untouched.
-    entries_blocked = index_regime is not None and regime is Regime.TREND_DOWN
+    index_today = regime_on(index_regime, d)[0] if index_regime is not None else None
+    # Entry block: no new long -- not paced, not rotated into, not offered as a
+    # manual buy -- while the block's source regime is in its set. Exits untouched.
+    entries_blocked = entry_block is not None and entry_block.blocks(regime, index_today)
+    block_note = (f"{entry_block.describe()} (breadth {regime.value}, index "
+                  f"{index_today.value if index_today else 'n/a'})") if entries_blocked else ""
     log.info("regime=%s (%s)%s", regime.value, regime_note,
-             " -- REG-01 new entries blocked" if entries_blocked else "")
+             f" -- new entries blocked: {block_note}" if entries_blocked else "")
     caps = regime_caps(regime)
     new_cap = int(caps["new"])
 
@@ -507,6 +511,61 @@ def run_nightly(
     # One model per session: every candidate shares this library (see BarrierModel).
     bmodel = BarrierModel(lib, horizon=Horizon.SWING, k_up=K_UP, k_dn=K_DN)
     log.info("path library: %d resolved paths", lib.height)
+
+    if strategy_version == "v2":
+        from .challenger import monthly_rebalance_dates, screen_session_v2
+
+        all_panel_dates = sorted(panel["d"].unique().to_list())
+        is_rebal = (d in monthly_rebalance_dates(all_panel_dates)) or (len(portfolio.positions) == 0)
+        day_panel_v2 = panel.filter(pl.col("d") == d)
+        use_pit_liq = day_panel_v2.height > 350
+
+        if use_pit_liq and "adtv_126" in day_panel_v2.columns:
+            top_syms = set(
+                day_panel_v2.sort("adtv_126", descending=True, nulls_last=True)
+                .head(350)["symbol"]
+                .to_list()
+            ) | {p.symbol for p in portfolio.positions}
+            corr_idx = ResidualCorrelationIndex(panel.filter(pl.col("symbol").is_in(sorted(top_syms))))
+        elif trade_syms:
+            corr_idx = ResidualCorrelationIndex(panel.filter(pl.col("symbol").is_in(sorted(trade_syms))))
+        else:
+            corr_idx = ResidualCorrelationIndex(panel)
+
+        recs = screen_session_v2(
+            day_panel_v2,
+            d=d,
+            portfolio=portfolio,
+            is_rebalance_day=is_rebal,
+            tradeable=None if use_pit_liq else (trade_syms or None),
+            use_pit_liquidity=use_pit_liq,
+            corr_index=corr_idx,
+            ind_today=ind_today,
+            bmodel=bmodel,
+            cfg=cfg,
+            entries_blocked=entries_blocked,
+            block_note=(entry_block.reason if entry_block is not None and entries_blocked else ""),
+            max_cards=max_cards,
+            run_id=run_id,
+        )
+        
+        trend_cols = [c for c in (
+            "d", "symbol", "trend_20", "trend_63", "trend_252",
+            "t_drift_20", "t_drift_63", "t_drift_252", "er_20", "er_63", "er_252",
+            "adx14", "adx_delta_10", "flips_63d", "trend_enum_version",
+        ) if c in panel.columns]
+        
+        trend_today = panel.filter(pl.col("d") == d).select(trend_cols)
+        
+        return RunResult(
+            run_id=run_id, as_of=as_of, d=d,
+            recommendations=recs,
+            rejections=pl.DataFrame(schema={"symbol": pl.Utf8, "rule_id": pl.Utf8, "reason": pl.Utf8, "detail": pl.Utf8}),
+            sector=sector,
+            breadth=pl.DataFrame(list(breadth_rows.values())) if breadth_rows else pl.DataFrame(),
+            trend=trend_today,
+            n_universe=len(score_syms or trade_syms), regime=regime,
+        )
 
     recs: list[dict] = []
     rejs: list[dict] = []
@@ -847,8 +906,8 @@ def run_nightly(
         tradeable = expectancy >= MIN_EXPECTANCY_ATR
         if tradeable and entries_blocked:
             action = Action.WATCH
-            edge_note = (f"REG-01: would qualify (E={expectancy:+.3f} ATR) but new longs are "
-                         f"blocked in a BEAR regime -- {regime_note}.")
+            edge_note = (f"ENTRY-BLOCK: would qualify (E={expectancy:+.3f} ATR) but new longs are "
+                         f"blocked -- {block_note}.")
             tradeable = False  # no size, and it must not join the simulated book
         elif tradeable:
             new_entries_today += 1

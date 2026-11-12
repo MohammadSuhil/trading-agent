@@ -76,6 +76,10 @@ def simulate_fill(
             return FillResult(
                 filled=False, barrier_hit=BarrierHit.CANCELLED, reason="GAP_BELOW_STOP"
             )
+        if item.entry_lo > 0 and bar.open < item.entry_lo:
+            return FillResult(
+                filled=False, barrier_hit=BarrierHit.CANCELLED, reason="GAP_BELOW_ENTRY_LO"
+            )
 
         fill_price = bar.open
         gross = item.qty * fill_price
@@ -170,7 +174,7 @@ def simulate_fill(
             )
 
         # 5. Vertical time-stop
-        max_sessions = HORIZON_SESSIONS.get(item.horizon, 10)
+        max_sessions = item.max_sessions if item.max_sessions > 0 else HORIZON_SESSIONS.get(item.horizon, 10)
         if item.sessions_held + 1 >= max_sessions:
             fill_price = bar.close
             gross = item.qty * fill_price
@@ -214,6 +218,7 @@ class PaperBroker:
 
         self.open_lots: dict[str, OpenLot] = {}
         self.pending_orders: dict[str, Order] = {}
+        self.pending_exits: dict[str, str] = {}
         self.events: list[LedgerEvent] = []
         self.equity_curve: list[dict[str, Any]] = []
         self.outcomes: list[dict[str, Any]] = []
@@ -299,6 +304,11 @@ class PaperBroker:
             },
         )
 
+    def schedule_exit(self, order_id: str, *, reason: str = "SIGNAL_EXIT") -> None:
+        """Schedule an exit for an open position."""
+        if order_id in self.open_lots:
+            self.pending_exits[order_id] = reason
+
     def step_session(
         self,
         d: date,
@@ -356,6 +366,7 @@ class PaperBroker:
                     reasons=order.reasons,
                     min_low_seen=bar.low,
                     max_high_seen=bar.high,
+                    max_sessions=order.max_sessions,
                 )
                 self.open_lots[order_id] = lot
                 ev = self._append_event(
@@ -402,25 +413,83 @@ class PaperBroker:
                 continue
             bar = bars_by_symbol.get(lot.symbol)
             if not bar:
+                # Handle missing bar (delisting, rename, suspension)
+                new_missing = lot.missing_bars + 1
+                if new_missing >= 5:
+                    # Liquidate zombie lot at last_price
+                    fill_price = lot.last_price
+                    gross = lot.qty * fill_price
+                    exit_cost = compute_costs(0.0, gross, self.product, cfg=self.cost_cfg).total
+                    net = gross - exit_cost
+                    del self.open_lots[order_id]
+                    self.pending_exits.pop(order_id, None)
+                    self.cash += net
+
+                    pnl_rupees = round(net - (lot.qty * lot.entry_price + lot.entry_cost), 2)
+                    risk_unit = lot.entry_price - lot.initial_stop
+                    r_multiple = (
+                        round((fill_price - lot.entry_price) / risk_unit, 4)
+                        if risk_unit > 0
+                        else 0.0
+                    )
+                    holding_days = (d - lot.entry_date).days
+
+                    outcome_dict = {
+                        "rec_id": lot.order_id,
+                        "symbol": lot.symbol,
+                        "arm": lot.arm.value,
+                        "horizon": lot.horizon.value,
+                        "entry_date": lot.entry_date.isoformat(),
+                        "entry_price": lot.entry_price,
+                        "exit_date": d.isoformat(),
+                        "exit_price": fill_price,
+                        "barrier_hit": BarrierHit.VERTICAL.value,
+                        "r_multiple": r_multiple,
+                        "pnl_rupees": pnl_rupees,
+                        "mae_r": 0.0,
+                        "mfe_r": 0.0,
+                        "holding_days": holding_days,
+                    }
+                    self.outcomes.append(outcome_dict)
+
+                    ev = self._append_event(
+                        ts=ts,
+                        run_id=run_id,
+                        kind=EventKind.POSITION_CLOSED,
+                        payload={
+                            **outcome_dict,
+                            "qty": lot.qty,
+                            "gross_notional": gross,
+                            "cost_rupees": exit_cost,
+                            "net_notional": net,
+                            "stop_slippage_bps": 0.0,
+                            "reason": "DELISTED_OR_RENAMED",
+                        },
+                    )
+                    emitted.append(ev)
+                else:
+                    # Update missing_bars and continue tracking
+                    self.open_lots[order_id] = replace(lot, missing_bars=new_missing)
                 continue
 
-            exit_fill = simulate_fill(lot, bar, product=self.product, cfg=self.cost_cfg)
-            if exit_fill.filled:
+            # Bar IS present: check for pending exits first
+            if order_id in self.pending_exits:
+                sched_reason = self.pending_exits.pop(order_id)
+                fill_price = bar.open
+                gross = lot.qty * fill_price
+                exit_cost = compute_costs(0.0, gross, self.product, cfg=self.cost_cfg).total
+                net = gross - exit_cost
                 del self.open_lots[order_id]
-                self.cash += exit_fill.net_notional
+                self.cash += net
 
-                pnl_rupees = round(exit_fill.net_notional - (lot.qty * lot.entry_price + lot.entry_cost), 2)
+                pnl_rupees = round(net - (lot.qty * lot.entry_price + lot.entry_cost), 2)
                 risk_unit = lot.entry_price - lot.initial_stop
                 r_multiple = (
-                    round((exit_fill.fill_price - lot.entry_price) / risk_unit, 4)
+                    round((fill_price - lot.entry_price) / risk_unit, 4)
                     if risk_unit > 0
                     else 0.0
                 )
                 holding_days = (d - lot.entry_date).days
-                min_l = min(lot.min_low_seen, bar.low)
-                max_h = max(lot.max_high_seen, bar.high)
-                mae_r = round((min_l - lot.entry_price) / risk_unit, 4) if risk_unit > 0 else 0.0
-                mfe_r = round((max_h - lot.entry_price) / risk_unit, 4) if risk_unit > 0 else 0.0
 
                 outcome_dict = {
                     "rec_id": lot.order_id,
@@ -430,12 +499,12 @@ class PaperBroker:
                     "entry_date": lot.entry_date.isoformat(),
                     "entry_price": lot.entry_price,
                     "exit_date": d.isoformat(),
-                    "exit_price": exit_fill.fill_price,
-                    "barrier_hit": exit_fill.barrier_hit.value,
+                    "exit_price": fill_price,
+                    "barrier_hit": BarrierHit.VERTICAL.value,
                     "r_multiple": r_multiple,
                     "pnl_rupees": pnl_rupees,
-                    "mae_r": mae_r,
-                    "mfe_r": mfe_r,
+                    "mae_r": 0.0,
+                    "mfe_r": 0.0,
                     "holding_days": holding_days,
                 }
                 self.outcomes.append(outcome_dict)
@@ -446,23 +515,78 @@ class PaperBroker:
                     kind=EventKind.POSITION_CLOSED,
                     payload={
                         **outcome_dict,
-                        "qty": exit_fill.qty,
-                        "gross_notional": exit_fill.gross_notional,
-                        "cost_rupees": exit_fill.cost_rupees,
-                        "net_notional": exit_fill.net_notional,
-                        "stop_slippage_bps": exit_fill.stop_slippage_bps,
-                        "reason": exit_fill.reason,
+                        "qty": lot.qty,
+                        "gross_notional": gross,
+                        "cost_rupees": exit_cost,
+                        "net_notional": net,
+                        "stop_slippage_bps": 0.0,
+                        "reason": sched_reason,
                     },
                 )
                 emitted.append(ev)
             else:
-                self.open_lots[order_id] = replace(
-                    lot,
-                    last_price=bar.close,
-                    sessions_held=lot.sessions_held + 1,
-                    min_low_seen=min(lot.min_low_seen, bar.low),
-                    max_high_seen=max(lot.max_high_seen, bar.high),
-                )
+                # Normal exit evaluation
+                exit_fill = simulate_fill(lot, bar, product=self.product, cfg=self.cost_cfg)
+                if exit_fill.filled:
+                    del self.open_lots[order_id]
+                    self.cash += exit_fill.net_notional
+
+                    pnl_rupees = round(exit_fill.net_notional - (lot.qty * lot.entry_price + lot.entry_cost), 2)
+                    risk_unit = lot.entry_price - lot.initial_stop
+                    r_multiple = (
+                        round((exit_fill.fill_price - lot.entry_price) / risk_unit, 4)
+                        if risk_unit > 0
+                        else 0.0
+                    )
+                    holding_days = (d - lot.entry_date).days
+                    min_l = min(lot.min_low_seen, bar.low)
+                    max_h = max(lot.max_high_seen, bar.high)
+                    mae_r = round((min_l - lot.entry_price) / risk_unit, 4) if risk_unit > 0 else 0.0
+                    mfe_r = round((max_h - lot.entry_price) / risk_unit, 4) if risk_unit > 0 else 0.0
+
+                    outcome_dict = {
+                        "rec_id": lot.order_id,
+                        "symbol": lot.symbol,
+                        "arm": lot.arm.value,
+                        "horizon": lot.horizon.value,
+                        "entry_date": lot.entry_date.isoformat(),
+                        "entry_price": lot.entry_price,
+                        "exit_date": d.isoformat(),
+                        "exit_price": exit_fill.fill_price,
+                        "barrier_hit": exit_fill.barrier_hit.value,
+                        "r_multiple": r_multiple,
+                        "pnl_rupees": pnl_rupees,
+                        "mae_r": mae_r,
+                        "mfe_r": mfe_r,
+                        "holding_days": holding_days,
+                    }
+                    self.outcomes.append(outcome_dict)
+
+                    ev = self._append_event(
+                        ts=ts,
+                        run_id=run_id,
+                        kind=EventKind.POSITION_CLOSED,
+                        payload={
+                            **outcome_dict,
+                            "qty": exit_fill.qty,
+                            "gross_notional": exit_fill.gross_notional,
+                            "cost_rupees": exit_fill.cost_rupees,
+                            "net_notional": exit_fill.net_notional,
+                            "stop_slippage_bps": exit_fill.stop_slippage_bps,
+                            "reason": exit_fill.reason,
+                        },
+                    )
+                    emitted.append(ev)
+                else:
+                    # No fill: reset missing_bars and update lot
+                    self.open_lots[order_id] = replace(
+                        lot,
+                        missing_bars=0,
+                        last_price=bar.close,
+                        sessions_held=lot.sessions_held + 1,
+                        min_low_seen=min(lot.min_low_seen, bar.low),
+                        max_high_seen=max(lot.max_high_seen, bar.high),
+                    )
 
         # 3. Update lots opened today at open with session close statistics
         for order_id, lot in list(self.open_lots.items()):

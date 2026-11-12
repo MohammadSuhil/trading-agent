@@ -341,7 +341,7 @@ export type BacktestComparison = {
   max_drawdown?: N;
   win_rate?: N;
   excess_return_pct?: N;
-  curve?: List<{ d?: S; equity?: N; regime?: S }>;
+  curve?: List<{ d?: S; equity?: N; regime?: S; index_regime?: S }>;
 };
 
 export type RuleState = 'OK' | 'WARN' | 'BREACH' | 'DISPLAY_ONLY';

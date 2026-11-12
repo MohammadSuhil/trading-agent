@@ -360,7 +360,7 @@ function SystemIntegrityPanel({
                 onChange={(e) => setCompare(e.target.checked)}
               />
               <Term code="REGIME_FILTER">
-                <span>Also run the regime-filter comparison (~2× time)</span>
+                <span>Also run the live-rules comparison (~2× time)</span>
               </Term>
             </label>
             <button
@@ -493,14 +493,14 @@ function SystemIntegrityPanel({
               </div>
 
               <div className="mt-4">
-                <div className="label mb-2">Control arm vs regime filter vs market</div>
+                <div className="label mb-2">Frozen control vs live rules vs market</div>
                 <EquityCurve
                   equityCurve={data?.equity_curve ?? []}
                   benchmarkCurve={data?.benchmark_curve ?? []}
                   comparisonCurve={data?.comparison?.curve ?? []}
                   labels={{
                     primary: 'Frozen control',
-                    comparison: 'Regime filter (rejected)',
+                    comparison: 'Live rules (v2 Sortino-Mom)',
                     benchmark: 'Nifty 500 index (price, rebased)',
                   }}
                   mode={mode}
@@ -544,7 +544,7 @@ function ComparisonNotes({ data }: { data: Backtest | null }) {
     rows.push({
       key: 'variant',
       swatch: <span className="inline-block w-4 border-b-2 border-dashed border-warning" />,
-      label: <Term code="REGIME_FILTER"><span>Regime filter (rejected)</span></Term>,
+      label: <Term code="REGIME_FILTER"><span>Live rules (v2 Sortino-Mom)</span></Term>,
       ret: c.total_return_pct ?? null, equity: c.final_equity ?? null, trades: c.n_trades ?? null,
       sharpe: c.sharpe ?? null, dd: c.max_drawdown ?? null, win: c.win_rate ?? null,
       excess: c.excess_return_pct ?? null,
@@ -603,11 +603,8 @@ function ComparisonNotes({ data }: { data: Backtest | null }) {
           the day-1 rules, locked forever. Every change must beat this line to count.
         </li>
         <li>
-          <b className="text-ink">Regime filter (rejected)</b> <TermInfo code="REGIME_FILTER" className="ml-0.5 align-middle" /> —
-          the same rules plus <Term code="REG-01"><span>REG-01</span></Term>: no new buys while the{' '}
-          <Term code="INDEX_REGIME"><span>index regime</span></Term> is bear. Hover the chart to see the regime each day.
-          It is <b>switched off</b> in live trading: tested on 2021–2025 data first, it did worse, because its bear
-          signal only turns on after a fall and so blocks buying in the recovery (ADR-0004).
+          <b className="text-ink">Live rules (v2 Sortino-Mom)</b> <TermInfo code="REGIME_FILTER" className="ml-0.5 align-middle" /> —
+          cross-sectional Sortino risk-adjusted momentum (0.45 × z-score of 12-month momentum, 0.35 × 126-day return, 0.20 × distance-to-52-week-high, all normalized by 252-day downside semideviation), evaluated on the survivorship-free point-in-time Top-350 liquid NSE EQ universe. Anchored monthly rebalance holds winners ranked ≤ 25 or above SMA200; daily protection via 12.5% initial stop, 18% trailing after +8% gain, and residual correlation gates. Won a pre-registered backtest against the frozen control: OOS 2021–07 +135.18% vs Nifty 500 +106.34% (5/5 starts, SR 1.05, DD 24%); IS 2025-07–2026-11 +46.33% vs +1.97% (5/5 starts, SR 1.61, DD 13.7%). Evaluated over n_trials = 36 (five start dates × six time windows, full Indian delivery costs).
           {!sameWindow && (
             <span className="text-warning-ink">
               {' '}

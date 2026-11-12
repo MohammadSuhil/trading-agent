@@ -315,6 +315,8 @@ CREATE TABLE IF NOT EXISTS ev.backtest_runs (
     curve_equity    Array(Float64),
     curve_drawdown  Array(Float32),
     curve_heat      Array(Float32),
-    curve_regime    Array(LowCardinality(String))
+    curve_regime    Array(LowCardinality(String)),   -- breadth regime: what set the caps
+    -- Index regime per day, information only. Added by ALTER 2026-11-12.
+    curve_index_regime Array(LowCardinality(String))
 ) ENGINE = MergeTree
 ORDER BY (line, sessions, run_ts);

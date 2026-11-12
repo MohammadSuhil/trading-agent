@@ -1,6 +1,6 @@
 # ADR-0004 — Index regime filter and "empirical calibration" spec: adopted in part, bear block rejected
 
-- **Status:** Accepted
+- **Status:** Superseded on 2026-11-12 by [ADR-0006](0006-live-entry-block-index-bear-sideways.md) — re-tested on the corrected engine with 5 start dates per period, an index block now beats the control. The part-by-part spec assessment below still stands.
 - **Date:** 2026-11-11
 - **Evaluates:** "Technical Specification: Deterministic Regime Filter & Empirical Calibration
   Engine" (user-supplied, 2026-11-11)
