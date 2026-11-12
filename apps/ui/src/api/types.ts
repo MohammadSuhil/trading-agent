@@ -341,6 +341,10 @@ export type BacktestComparison = {
   max_drawdown?: N;
   win_rate?: N;
   excess_return_pct?: N;
+  bench_return_pct?: N;
+  psr?: N;
+  dsr?: N;
+  min_trl?: N;
   curve?: List<{ d?: S; equity?: N; regime?: S; index_regime?: S }>;
 };
 

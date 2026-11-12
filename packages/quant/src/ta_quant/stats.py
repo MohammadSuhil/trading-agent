@@ -342,6 +342,7 @@ def compute_backtest_stats(
 
     # Sharpe, Skewness, Kurtosis
     m = len(daily_returns)
+    daily_sr = 0.0
     if m >= 2:
         mean_r = sum(daily_returns) / m
         var_r = sum((x - mean_r) ** 2 for x in daily_returns) / (m - 1)
@@ -365,19 +366,19 @@ def compute_backtest_stats(
         skew = 0.0
         kurt = 3.0
 
-    # PSR against 0.0 benchmark
+    # PSR/DSR count n_obs in sessions, so they take the per-session Sharpe.
     psr = round(
         probabilistic_sharpe_ratio(
-            sharpe_annualised, 0.0, max(2, m), skew=skew, kurt=kurt
+            daily_sr, 0.0, max(2, m), skew=skew, kurt=kurt
         ),
         4,
     )
 
-    # DSR under n_trials
-    std_sr_trials = max(0.5, 1.0 / math.sqrt(max(1, m)))
+    # Cross-trial Sharpe dispersion in per-session units: 0.5 annualised floor, or the SE 1/sqrt(m).
+    std_sr_trials = max(0.5 / math.sqrt(252.0), 1.0 / math.sqrt(max(1, m)))
     dsr = round(
         deflated_sharpe_ratio(
-            sharpe_annualised,
+            daily_sr,
             max(2, m),
             n_trials,
             skew=skew,

@@ -273,6 +273,19 @@ function SystemIntegrityPanel({
 
   const statsInsufficient = data?.stats_state !== 'OK';
   const notRun = data?.state === 'NOT_RUN';
+  // Headline figures describe the strategy actually trading (live rules); the
+  // frozen control is only the yardstick, shown in the comparison table below.
+  const live = data?.comparison?.same_window ? data.comparison : null;
+  const head = {
+    label: live ? 'Live rules (v2)' : 'Frozen control — live rules not run for this window',
+    final_equity: live ? live.final_equity : data?.final_equity,
+    total_return_pct: live ? live.total_return_pct : data?.total_return_pct,
+    sharpe: live ? live.sharpe : data?.sharpe,
+    psr: live ? live.psr : data?.psr,
+    dsr: live ? live.dsr : data?.dsr,
+    min_trl: live ? live.min_trl : data?.min_trl,
+    excess: live ? live.excess_return_pct : data?.benchmark?.excess_return_pct,
+  };
   // useApi keeps the previous render while refetching (and on a failed fetch),
   // so the shown data can belong to another window. Say so instead of
   // presenting it under the newly selected window's label.
@@ -394,19 +407,19 @@ function SystemIntegrityPanel({
               run and will be replaced (if this does not change, the API may be restarting — refresh in a moment).
             </p>
           )}
-          {!stale && data?.run && isNum(data?.benchmark?.excess_return_pct) && (
+          {!stale && data?.run && isNum(head.excess) && (
             <p className="mb-2 text-sm">
               <Term code="NIFTY500_PRICE">
-                <span className="font-semibold">Benchmark verdict:</span>
+                <span className="font-semibold">Benchmark verdict ({head.label}):</span>
               </Term>{' '}
-              {data.benchmark?.beats_benchmark ? (
+              {(head.excess ?? 0) > 0 ? (
                 <span className="text-good-ink">
-                  beats the Nifty 500 by {signedPctFrac(data.benchmark?.excess_return_pct, 2)} pts over this window.
+                  beats the Nifty 500 by {signedPctFrac(head.excess, 2)} pts over this window.
                 </span>
               ) : (
                 <span className="text-critical-ink">
-                  trails the Nifty 500 by {pctFrac(Math.abs(data.benchmark?.excess_return_pct ?? 0), 2)} pts over
-                  this window ({signedPctFrac(data.total_return_pct, 2)} vs {signedPctFrac(data.benchmark?.return_pct, 2)}).
+                  trails the Nifty 500 by {pctFrac(Math.abs(head.excess ?? 0), 2)} pts over
+                  this window ({signedPctFrac(head.total_return_pct, 2)} vs {signedPctFrac(data.benchmark?.return_pct, 2)}).
                   Simply holding the index would have done better.
                 </span>
               )}
@@ -442,25 +455,28 @@ function SystemIntegrityPanel({
             />
           ) : (
             <div className="space-y-4">
+              <p className="text-xs text-ink2">
+                Figures below: <b className="text-ink">{head.label}</b>
+              </p>
               <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
                 <StatTile
                   label="Final Equity"
-                  value={inr(data?.final_equity)}
+                  value={inr(head.final_equity)}
                   footnote="backtest end"
                 />
                 <StatTile
                   label="Total Return"
-                  value={signedPctFrac(data?.total_return_pct, 2)}
+                  value={signedPctFrac(head.total_return_pct, 2)}
                   footnote="compound return"
                 />
                 <StatTile
                   label="Annualised Sharpe"
-                  value={num(data?.sharpe, 2)}
+                  value={num(head.sharpe, 2)}
                   footnote="zero-risk benchmark"
                 />
                 <StatTile
                   label="PSR"
-                  value={pctFrac(data?.psr, 1)}
+                  value={pctFrac(head.psr, 1)}
                   footnote={
                     <>
                       Probabilistic Sharpe <TermInfo code="PSR" className="ml-1 align-middle" />
@@ -469,7 +485,7 @@ function SystemIntegrityPanel({
                 />
                 <StatTile
                   label="DSR"
-                  value={pctFrac(data?.dsr, 1)}
+                  value={pctFrac(head.dsr, 1)}
                   footnote={
                     <>
                       Deflated Sharpe <TermInfo code="DSR" className="ml-1 align-middle" />
@@ -480,7 +496,7 @@ function SystemIntegrityPanel({
                   label="MinTRL"
                   value={
                     <>
-                      {count(data?.min_trl)}{' '}
+                      {count(head.min_trl)}{' '}
                       <span className="text-xs font-normal text-muted">sessions</span>
                     </>
                   }

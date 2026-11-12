@@ -1300,7 +1300,9 @@ def execute_backtest(
 
         s = res.stats
         sim = _forward_simulation(res)
-        m_trl = min_trl(s.sharpe_annualised) if s.sharpe_annualised > 0 else 0.0
+        # min_trl counts observations, so it needs the per-session Sharpe, not the annualised one.
+        daily_sr = s.sharpe_annualised / (252.0 ** 0.5)
+        m_trl = min_trl(daily_sr) if daily_sr > 0 else 0.0
         min_trl_val = float(round(m_trl, 1)) if m_trl != float("inf") else 0.0
         line = "REGIME_FILTER" if regime_filter else (
             "FROZEN_CONTROL" if arm_obj is Arm.FROZEN_CONTROL and entry_block is None else None)

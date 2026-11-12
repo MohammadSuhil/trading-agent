@@ -1056,7 +1056,10 @@ def backtest(sessions: int | None = None) -> dict:
                     "n_sessions": v["n_sessions"], "n_trades": v["n_trades"],
                     "final_equity": v["final_equity"], "total_return_pct": v["total_return"],
                     "sharpe": v["sharpe"], "max_drawdown": v["max_drawdown"], "win_rate": v["win_rate"],
-                    "excess_return_pct": v["excess_return"],
+                    "excess_return_pct": v["excess_return"], "bench_return_pct": v["bench_return"],
+                    "psr": v["psr"] if int(v["n_sessions"]) >= 63 else None,
+                    "dsr": v["dsr"] if int(v["n_sessions"]) >= 63 else None,
+                    "min_trl": v["min_trl"] if int(v["n_sessions"]) >= 63 else None,
                     "curve": [{"d": str(d_), "equity": e_, "regime": g_, "index_regime": ig_} for d_, e_, g_, ig_ in
                               zip(v["curve_d"], v["curve_equity"], v["curve_regime"],
                                   v["curve_index_regime"] or [None] * len(v["curve_d"]), strict=True)] if same else [],
