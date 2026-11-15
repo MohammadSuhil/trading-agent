@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 import polars as pl
@@ -20,9 +20,16 @@ from ta_datafeed.adjust import apply_adjustments, infer_corporate_actions
 from ta_datafeed.sources.surveillance import load_surveillance_symbols
 from ta_datafeed.store import GuardedClient
 from ta_ledger.events import GENESIS_HASH, EventKind, LedgerEvent, events_to_df
-from ta_ledger.risk import DEFAULT, Portfolio, Position
+from ta_ledger.risk import (
+    DEFAULT,
+    TIERED_DEFAULT,
+    Portfolio,
+    Position,
+    clamp_portfolio_principal_heat,
+)
 
 from .pipeline import RunResult, run_nightly
+from .weights import load_challenger_weights
 
 log = logging.getLogger(__name__)
 
@@ -109,7 +116,8 @@ def load_panel_inputs(
     try:
         stored_actions = ch.query_pit(
             "md.corporate_actions", a,
-            columns="symbol, ex_date, action_type, ratio_from, ratio_to, adj_factor, dividend, knowledge_time",
+            columns=("symbol, ex_date, action_type, ratio_from, ratio_to, dividend, "
+                     "adj_factor, announce_date, knowledge_time"),
         )
     except Exception as e:  # noqa: BLE001
         log.warning("md.corporate_actions read failed (%s); using inferred only", e)
@@ -117,7 +125,12 @@ def load_panel_inputs(
 
     if not stored_actions.is_empty():
         if not inferred_actions.is_empty():
-            actions = pl.concat([inferred_actions, stored_actions]).unique(
+            # Align by name, not position: the inferred frame and the stored
+            # read only matched while md.corporate_actions was empty; a
+            # positional concat raised ShapeError the first time it was not.
+            actions = pl.concat(
+                [inferred_actions, stored_actions], how="diagonal_relaxed"
+            ).unique(
                 subset=["symbol", "ex_date"], keep="last"
             )
         else:
@@ -913,6 +926,69 @@ def step_paper_book(
                 curr_prev_hash = event.hash
                 exited_symbols.add(symbol)
 
+    # Step 1.6: TIER-04 daily principal heat stop ratchet on surviving open positions
+    try:
+        pf_mid = current_portfolio(ch)
+        if pf_mid.positions:
+            w_mv = load_challenger_weights()
+            clamped_pos = clamp_portfolio_principal_heat(
+                pf_mid, max_heat_pct=w_mv.tiered_max_portfolio_heat_pct
+            )
+            pos_sleeve_map = {str(p["symbol"]): str(p.get("sleeve") or "MOMENTUM_BREAKOUT") for p in open_pos}
+            clamp_ts = res.as_of + timedelta(milliseconds=1)
+            for orig_p, new_p in zip(pf_mid.positions, clamped_pos):
+                new_stop_r = round(new_p.stop, 2)
+                if new_stop_r > round(orig_p.stop, 2):
+                    pos_clamp_df = pl.DataFrame([{
+                        "as_of": clamp_ts,
+                        "symbol": new_p.symbol,
+                        "industry": new_p.industry,
+                        "qty": new_p.qty,
+                        "entry": new_p.entry,
+                        "last": new_p.last,
+                        "stop": new_stop_r,
+                        "target": new_p.target,
+                        "opened": new_p.opened,
+                        "horizon": new_p.horizon,
+                        "sleeve": pos_sleeve_map.get(new_p.symbol, "MOMENTUM_BREAKOUT"),
+                        "status": "OPEN",
+                        "pnl": round((new_p.last - new_p.entry) * new_p.qty, 2),
+                    }], schema={
+                        "as_of": pl.Datetime("ms", "UTC"),
+                        "symbol": pl.Utf8,
+                        "industry": pl.Utf8,
+                        "qty": pl.UInt32,
+                        "entry": pl.Float64,
+                        "last": pl.Float64,
+                        "stop": pl.Float64,
+                        "target": pl.Float64,
+                        "opened": pl.Date,
+                        "horizon": pl.Utf8,
+                        "sleeve": pl.Utf8,
+                        "status": pl.Utf8,
+                        "pnl": pl.Float64,
+                    })
+                    ch.insert_df("ev.positions", pos_clamp_df)
+                    event = LedgerEvent.create(
+                        seq=curr_seq,
+                        ts=clamp_ts,
+                        run_id=res.run_id,
+                        kind=EventKind.STOP_TRAILED,
+                        payload={
+                            "d": str(res.d),
+                            "symbol": new_p.symbol,
+                            "prev_stop": round(orig_p.stop, 2),
+                            "new_stop": new_stop_r,
+                            "note": "TIER-04 portfolio principal heat stop ratchet",
+                        },
+                        prev_hash=curr_prev_hash,
+                    )
+                    ch.insert_df("ev.ledger_events", events_to_df([event]))
+                    curr_seq += 1
+                    curr_prev_hash = event.hash
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not apply TIER-04 heat stop ratchet: %s", e)
+
     # Step 1.8: Resolve past recommendations against historical paths for learning feedback loop
     try:
         resolved_count = resolve_past_recommendations(ch, bars, res.d, res.as_of)
@@ -921,90 +997,103 @@ def step_paper_book(
     except Exception as e:  # noqa: BLE001
         log.warning("could not resolve past recommendations: %s", e)
 
-    # Step 2: Auto-enter tonight's BUY recommendations when auto_buy=True
+    # Step 2: Auto-enter tonight's BUY recommendations under 4-Tier Risk Engine
     if auto_buy and not res.recommendations.is_empty():
-        from ta_ledger.risk import regime_caps
-        max_new_entries = int(regime_caps(res.regime)["new"])
-        try:
-            pos_df2 = ch.query_df("SELECT as_of, symbol, opened, status FROM ev.positions")
-            if not pos_df2.is_empty():
-                open_df2 = (
-                    pos_df2.sort("as_of")
-                    .unique(subset=["symbol", "opened"], keep="last")
-                    .filter(pl.col("status") == "OPEN")
-                )
-                open_symbols = set(open_df2["symbol"].to_list())
-                new_entered = int(open_df2.filter(pl.col("opened") == res.d).height)
-            else:
-                open_symbols = set()
-                new_entered = 0
-        except Exception:  # noqa: BLE001
-            open_symbols = set()
-            new_entered = 0
+        w_mv = load_challenger_weights()
+        pf_pre_buy = current_portfolio(ch)
+        max_positions = w_mv.tiered_max_positions
+        max_per_ind = w_mv.tiered_max_per_industry
+        max_ind_heat_rs = TIERED_DEFAULT.max_industry_heat_pct * pf_pre_buy.equity
+        max_port_heat_rs = w_mv.tiered_max_portfolio_heat_pct * pf_pre_buy.equity
+        avail_cash = pf_pre_buy.cash - pf_pre_buy.equity * TIERED_DEFAULT.cash_floor_pct
+
+        open_symbols = {p.symbol for p in pf_pre_buy.positions}
+        ind_counts: dict[str, int] = {}
+        ind_heat_rs: dict[str, float] = {}
+        for p in pf_pre_buy.positions:
+            ind_counts[p.industry] = ind_counts.get(p.industry, 0) + 1
+            ind_heat_rs[p.industry] = ind_heat_rs.get(p.industry, 0.0) + p.principal_risk_rupees
+        cur_heat_rs = pf_pre_buy.principal_heat
 
         for rec in res.recommendations.iter_rows(named=True):
-            if rec["action"] == "BUY" and int(rec.get("qty") or 0) > 0 and rec["symbol"] not in open_symbols:
-                if new_entered >= max_new_entries:
-                    break
-                entry_price = round((float(rec["entry_lo"]) + float(rec["entry_hi"])) / 2.0, 2)
-                qty = int(rec["qty"])
-                stop = float(rec["stop"])
-                target = float(rec.get("target") or 0.0)
+            if rec["action"] != "BUY" or int(rec.get("qty") or 0) <= 0:
+                continue
+            sym = str(rec["symbol"])
+            ind = str(rec.get("industry") or "")
+            if sym in open_symbols or len(open_symbols) >= max_positions:
+                continue
+            if ind_counts.get(ind, 0) >= max_per_ind:
+                continue
+            entry_price = round((float(rec["entry_lo"]) + float(rec["entry_hi"])) / 2.0, 2)
+            qty = int(rec["qty"])
+            stop = float(rec["stop"])
+            target = float(rec.get("target") or 0.0)
+            notional = round(qty * entry_price, 2)
+            trade_risk_rs = max(0.0, (entry_price - stop) * qty)
+            if (
+                notional > avail_cash
+                or ind_heat_rs.get(ind, 0.0) + trade_risk_rs > max_ind_heat_rs + 1.0
+                or cur_heat_rs + trade_risk_rs > max_port_heat_rs + 1.0
+            ):
+                continue
 
-                pos_entry_df = pl.DataFrame([{
-                    "as_of": res.as_of,
-                    "symbol": rec["symbol"],
-                    "industry": str(rec.get("industry") or ""),
+            pos_entry_df = pl.DataFrame([{
+                "as_of": res.as_of,
+                "symbol": sym,
+                "industry": ind,
+                "qty": qty,
+                "entry": entry_price,
+                "last": entry_price,
+                "stop": stop,
+                "target": target,
+                "opened": res.d,
+                "horizon": str(rec.get("horizon") or "SWING"),
+                "sleeve": str(rec.get("sleeve") or "MOMENTUM_BREAKOUT"),
+                "status": "OPEN",
+                "pnl": 0.0,
+            }], schema={
+                "as_of": pl.Datetime("ms", "UTC"),
+                "symbol": pl.Utf8,
+                "industry": pl.Utf8,
+                "qty": pl.UInt32,
+                "entry": pl.Float64,
+                "last": pl.Float64,
+                "stop": pl.Float64,
+                "target": pl.Float64,
+                "opened": pl.Date,
+                "horizon": pl.Utf8,
+                "sleeve": pl.Utf8,
+                "status": pl.Utf8,
+                "pnl": pl.Float64,
+            })
+            ch.insert_df("ev.positions", pos_entry_df)
+
+            event = LedgerEvent.create(
+                seq=curr_seq,
+                ts=res.as_of,
+                run_id=res.run_id,
+                kind=EventKind.ENTRY_FILL,
+                payload={
+                    "d": str(res.d),
+                    "symbol": sym,
+                    "side": "BUY",
                     "qty": qty,
-                    "entry": entry_price,
-                    "last": entry_price,
+                    "price": entry_price,
+                    "notional": notional,
                     "stop": stop,
                     "target": target,
-                    "opened": res.d,
-                    "horizon": str(rec.get("horizon") or "SWING"),
-                    "sleeve": str(rec.get("sleeve") or "MOMENTUM_BREAKOUT"),
-                    "status": "OPEN",
-                    "pnl": 0.0,
-                }], schema={
-                    "as_of": pl.Datetime("ms", "UTC"),
-                    "symbol": pl.Utf8,
-                    "industry": pl.Utf8,
-                    "qty": pl.UInt32,
-                    "entry": pl.Float64,
-                    "last": pl.Float64,
-                    "stop": pl.Float64,
-                    "target": pl.Float64,
-                    "opened": pl.Date,
-                    "horizon": pl.Utf8,
-                    "sleeve": pl.Utf8,
-                    "status": pl.Utf8,
-                    "pnl": pl.Float64,
-                })
-                ch.insert_df("ev.positions", pos_entry_df)
-                open_symbols.add(rec["symbol"])
-
-                event = LedgerEvent.create(
-                    seq=curr_seq,
-                    ts=res.as_of,
-                    run_id=res.run_id,
-                    kind=EventKind.ENTRY_FILL,
-                    payload={
-                        "d": str(res.d),
-                        "symbol": rec["symbol"],
-                        "side": "BUY",
-                        "qty": qty,
-                        "price": entry_price,
-                        "notional": round(qty * entry_price, 2),
-                        "stop": stop,
-                        "target": target,
-                        "note": "auto-executed BUY recommendation",
-                    },
-                    prev_hash=curr_prev_hash,
-                )
-                ch.insert_df("ev.ledger_events", events_to_df([event]))
-                curr_seq += 1
-                curr_prev_hash = event.hash
-                new_entered += 1
+                    "note": f"auto-executed BUY ({rec.get('afford_note') or 'MetaVoter 4-Tier Risk'})",
+                },
+                prev_hash=curr_prev_hash,
+            )
+            ch.insert_df("ev.ledger_events", events_to_df([event]))
+            curr_seq += 1
+            curr_prev_hash = event.hash
+            open_symbols.add(sym)
+            ind_counts[ind] = ind_counts.get(ind, 0) + 1
+            ind_heat_rs[ind] = ind_heat_rs.get(ind, 0.0) + trade_risk_rs
+            cur_heat_rs += trade_risk_rs
+            avail_cash -= notional
 
     # Step 3: Record ev.equity_daily snapshot for res.d
     try:
@@ -1015,7 +1104,7 @@ def step_paper_book(
             "equity": float(pf_now.equity),
             "cash": float(pf_now.cash),
             "deployed": float(pf_now.deployed),
-            "heat_pct": float(pf_now.heat_pct),
+            "heat_pct": float(pf_now.principal_heat_pct),
             "drawdown": float(pf_now.drawdown_pct),
             "watermark": float(pf_now.watermark),
         }], schema={
@@ -1160,34 +1249,53 @@ def execute_backtest(
     with GuardedClient() as ch:
         d = latest_session(ch)
         a = AsOf(datetime.now(UTC))
-        bars, members = load_panel_inputs(ch, d, a=a, lookback=max(420, sessions + 260))
-        
+        bars, members = load_panel_inputs(ch, d, a=a, lookback=max(420, sessions + 320))
+
         n500 = members.filter(pl.col("index_name") == "NIFTY500")["symbol"].to_list() if not members.is_empty() else []
         ref_bars = bars.filter(pl.col("symbol").is_in(n500)) if n500 else bars
         sorted_dates = sorted(ref_bars["d"].unique().to_list())
-        start_date = sorted_dates[-sessions] if len(sorted_dates) > sessions else None
+        start_date = sorted_dates[-sessions] if len(sorted_dates) > sessions else (sorted_dates[0] if sorted_dates else None)
 
         # For FROZEN_CONTROL v1: filter to Nifty 500 only.
-        # For DETERMINISTIC v2: keep all EQ bars (Zero-Survivorship PIT Top-350).
+        # For DETERMINISTIC v2: keep all EQ bars over the same session calendar (Zero-Survivorship PIT Top-350).
         if arm_obj is Arm.FROZEN_CONTROL and not regime_filter:
             if n500:
                 bars = ref_bars
         else:
-            bars = bars.filter(pl.col("series") == "EQ")
+            bars = bars.filter((pl.col("series") == "EQ") & pl.col("d").is_in(sorted_dates)) if sorted_dates else bars.filter(pl.col("series") == "EQ")
 
         # The regime series is loaded for every run: it gates trades only when
         # regime_filter is set, but it is also stamped on each curve point so
         # the chart can say what the market was doing on any day.
         regime_info = load_index_regime(ch, d, a)
         if regime_filter and entry_block is None:
-            # The page's comparison line is the LIVE rules: frozen control +
-            # the adopted entry block (v2 internal gating).
+            # The page's comparison line is the LIVE rules: MetaVoter + 4-Tier Risk.
             entry_block = LIVE_ENTRY_BLOCK
         index_regime = regime_info
-        
+
         # Determine effective strategy version and parameters
         if arm_obj is Arm.DETERMINISTIC or regime_filter:
-            # v2 mode with PIT liquidity, 36 trials, 40 warmup
+            # v2 MetaVoter + 4-Tier Risk with PIT liquidity, 5 logged variants, full warmup
+            try:
+                idx_bars = ch.query_pit(
+                    "md.index_1d", a,
+                    columns="d, index_name, open, high, low, close",
+                    where=f"index_name = '{BENCHMARK_INDEX}' AND d <= '{d}'",
+                    order_by="d",
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not load index_bars for MetaVoter regime: %s", e)
+                idx_bars = None
+            try:
+                vix_bars = ch.query_pit(
+                    "md.index_1d", a,
+                    columns="d, index_name, close",
+                    where=f"index_name = 'India VIX' AND d <= '{d}'",
+                    order_by="d",
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not load vix_bars for MetaVoter regime: %s", e)
+                vix_bars = None
             eff_block = entry_block if entry_block is not None else LIVE_ENTRY_BLOCK
             res = run_backtest(
                 bars,
@@ -1200,7 +1308,9 @@ def execute_backtest(
                 entry_block=eff_block,
                 strategy_version=LIVE_STRATEGY_VERSION,
                 use_pit_liquidity=True,
-                n_trials=36,
+                n_trials=5,
+                index_bars=idx_bars,
+                vix_bars=vix_bars,
             )
         else:
             # FROZEN_CONTROL v1 mode: preserve 100% original behavior

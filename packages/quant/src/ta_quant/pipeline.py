@@ -473,6 +473,15 @@ def run_nightly(
             r["industry"]: r
             for r in ind_tr.filter(pl.col("d") == d).iter_rows(named=True)
         }
+    if "Unclassified" not in ind_today and not panel.is_empty():
+        mkt_tr = industry_trends(
+            panel.with_columns(pl.lit("__MARKET__").alias("industry")),
+            score_syms or trade_syms,
+        )
+        if not mkt_tr.is_empty():
+            mkt_rows = mkt_tr.filter(pl.col("d") == d).to_dicts()
+            if mkt_rows:
+                ind_today["Unclassified"] = {**mkt_rows[0], "industry": "Unclassified"}
     market_breadth = breadth_row(panel, d, market_index, score_syms)
     trade_breadth = breadth_row(panel, d, tradeable_index, trade_syms)
     breadth_rows = {
@@ -537,7 +546,7 @@ def run_nightly(
             d=d,
             portfolio=portfolio,
             is_rebalance_day=is_rebal,
-            tradeable=None if use_pit_liq else (trade_syms or None),
+            tradeable=trade_syms or None,
             use_pit_liquidity=use_pit_liq,
             corr_index=corr_idx,
             ind_today=ind_today,

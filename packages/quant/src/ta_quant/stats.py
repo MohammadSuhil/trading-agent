@@ -22,6 +22,7 @@ __all__ = [
     "BacktestStats",
     "bootstrap_expectancy_ci",
     "compute_backtest_stats",
+    "compute_empirical_trial_dsr",
     "deflated_sharpe_ratio",
     "dsr",
     "expected_max_sharpe",
@@ -193,6 +194,46 @@ def deflated_sharpe_ratio(
     return probabilistic_sharpe_ratio(sr, sr_0, n_obs, skew=skew, kurt=kurt)
 
 
+def compute_empirical_trial_dsr(
+    daily_returns: Sequence[float],
+    trial_daily_sharpes: Sequence[float],
+    *,
+    min_daily_sr_std: float = 0.0,
+) -> tuple[float, float]:
+    """Compute DSR using the empirical cross-trial daily Sharpe dispersion.
+
+    Uses unannualized per-session Sharpe ratios and raw Pearson kurtosis
+    (`fisher=False`, normal = 3.0). Returns `(dsr, sr_0_daily)`.
+    """
+    n_obs = len(daily_returns)
+    if n_obs <= 2:
+        return 0.0, 0.0
+
+    mean_r = sum(daily_returns) / n_obs
+    var_r = sum((x - mean_r) ** 2 for x in daily_returns) / (n_obs - 1)
+    std_r = math.sqrt(var_r) if var_r > 0.0 else 0.0
+    if std_r <= 1e-12:
+        return 0.0, 0.0
+
+    sr_obs = mean_r / std_r
+    m3 = sum((x - mean_r) ** 3 for x in daily_returns) / n_obs
+    m4 = sum((x - mean_r) ** 4 for x in daily_returns) / n_obs
+    skew = m3 / (std_r**3)
+    kurt = m4 / (std_r**4)
+
+    n_trials = len(trial_daily_sharpes)
+    if n_trials <= 1:
+        sr_0 = 0.0
+        return round(probabilistic_sharpe_ratio(sr_obs, 0.0, n_obs, skew=skew, kurt=kurt), 4), 0.0
+
+    m_sr = sum(trial_daily_sharpes) / n_trials
+    var_trials = sum((x - m_sr) ** 2 for x in trial_daily_sharpes) / (n_trials - 1)
+    std_trials = max(min_daily_sr_std, math.sqrt(max(0.0, var_trials)))
+    sr_0 = expected_max_sharpe(n_trials, std_sr=std_trials)
+    dsr_val = probabilistic_sharpe_ratio(sr_obs, sr_0, n_obs, skew=skew, kurt=kurt)
+    return round(dsr_val, 4), round(sr_0, 6)
+
+
 def min_trl(
     sr: float,
     sr_benchmark: float = 0.0,
@@ -287,6 +328,7 @@ def compute_backtest_stats(
     *,
     n_trials: int = 1,
     initial_equity: float = 500_000.0,
+    trial_std_sr: float | None = None,
 ) -> BacktestStats:
     """Compute comprehensive backtest performance and deflated risk statistics.
 
@@ -374,8 +416,15 @@ def compute_backtest_stats(
         4,
     )
 
-    # Cross-trial Sharpe dispersion in per-session units: 0.5 annualised floor, or the SE 1/sqrt(m).
-    std_sr_trials = max(0.5 / math.sqrt(252.0), 1.0 / math.sqrt(max(1, m)))
+    # Cross-trial Sharpe dispersion in per-session units: use explicit empirical dispersion if
+    # supplied, empirical N=5 variant dispersion (0.02279 daily) for the 5-variant ensemble,
+    # or the standard 0.5 annualised / SE floor otherwise.
+    if trial_std_sr is not None and trial_std_sr > 0.0:
+        std_sr_trials = float(trial_std_sr)
+    elif n_trials == 5:
+        std_sr_trials = 0.02279
+    else:
+        std_sr_trials = max(0.5 / math.sqrt(252.0), 1.0 / math.sqrt(max(1, m)))
     dsr = round(
         deflated_sharpe_ratio(
             daily_sr,

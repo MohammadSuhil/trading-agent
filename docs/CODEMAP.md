@@ -277,10 +277,11 @@ P(target hit), P(stop hit), P(time-stop) -- the most dangerous numbers here.
 
 V2 Challenger Strategy (ADR-0007): Sortino Risk-Adjusted Momentum with Monthly Rank-Buffer.
 
+- `compute_multivariant_bonus(res_mom_63: float, er_63: float, sym_barrier_edge: float, up_dn_vol_20: float) -> float` -- Additive orthogonal meta-voter composite bonus over Sortino baseline rank.
 - `monthly_rebalance_dates(sessions: Sequence[date]) -> set[date]` -- Return the first observed session of each `(year, month)` across sorted sessions.
 - `score_universe_v2(day_panel: pl.DataFrame, *, tradeable: set[str] | None=None, cfg: RiskConfig=DEFAULT, weights: ChallengerWeights | None=None, use_pit_liqui...` -- Cross-sectional Sortino-momentum ranking with hard liquidity/price gates.
 - `screen_session_v2(day_panel: pl.DataFrame, *, d: date, portfolio: Portfolio, is_rebalance_day: bool=True, tradeable: set[str] | None=None, use_pit_liquidity:...` -- Produce live recommendation cards matching `pipeline.run_nightly` schema.
-- `run_backtest_v2(bars: pl.DataFrame, members: pl.DataFrame, *, start_date: date | None=None, end_date: date | None=None, initial_equity: float=500000.0, arm: ...` -- Execute v2 Sortino-Momentum Monthly Rank-Buffer backtest via `PaperBroker`.
+- `run_backtest_v2(bars: pl.DataFrame, members: pl.DataFrame, *, start_date: date | None=None, end_date: date | None=None, initial_equity: float=500000.0, arm: ...` -- Execute v2 MetaVoter + 4-Tier Risk Engine backtest via `PaperBroker`.
 
 ### `packages/quant/src/ta_quant/factors/correlation.py`
 
@@ -337,6 +338,9 @@ Index-based market regime: deterministic rules on the benchmark index (ADR-0004)
 - `class EntryBlock` -- One rule: no NEW long while `source`'s regime is in `regimes`.
   - `blocks(self, breadth: Regime, index: Regime | None) -> bool`
   - `describe(self) -> str`
+- `class MacroRegime(StrEnum)` -- 4-state causal macro market regime for ensemble meta-voting and adaptive trails.
+- `compute_hurst_rs(log_returns: Sequence[float]) -> float` -- Rescaled-range (R/S) Hurst exponent clamped to `[0.05, 0.95]` (`0.5` if `< 60` bars).
+- `classify_macro_regime_panel(index_bars: pl.DataFrame, vix_bars: pl.DataFrame | None=None, *, breadth_by_date: Mapping[date, float] | None=None, index_name: s...` -- Classify every session strictly causally into the 4-state `MacroRegime`.
 
 ### `packages/quant/src/ta_quant/stats.py`
 
@@ -347,10 +351,11 @@ Statistical validation, Deflated Sharpe Ratio, and bootstrap expectancy.
 - `probabilistic_sharpe_ratio(sr: float, sr_benchmark: float, n_obs: int, *, skew: float=0.0, kurt: float=3.0) -> float` -- Probabilistic Sharpe Ratio (Bailey & López de Prado 2012).
 - `expected_max_sharpe(n_trials: int, std_sr: float=1.0) -> float` -- Expected Maximum Sharpe Ratio under N independent trials (Bailey & López de Prado 2014).
 - `deflated_sharpe_ratio(sr: float, n_obs: int, n_trials: int, *, skew: float=0.0, kurt: float=3.0, std_sr: float=1.0) -> float` -- Deflated Sharpe Ratio (Bailey & López de Prado 2014).
+- `compute_empirical_trial_dsr(daily_returns: Sequence[float], trial_daily_sharpes: Sequence[float], *, min_daily_sr_std: float=0.0) -> tuple[float, float]` -- Compute DSR using the empirical cross-trial daily Sharpe dispersion.
 - `min_trl(sr: float, sr_benchmark: float=0.0, *, skew: float=0.0, kurt: float=3.0, alpha: float=0.05) -> float` -- Minimum Track Record Length in number of observations (Bailey & López de Prado 2012).
 - `bootstrap_expectancy_ci(r_multiples: Sequence[float], *, n_boot: int=1000, ci: float=0.9, seed: int=42) -> tuple[float, float, float]` -- Deterministic seeded bootstrap confidence interval for mean expectancy (R-multiples).
 - `class BacktestStats` -- Summary statistics for backtest and paper trading performance.
-- `compute_backtest_stats(equity_curve: Sequence[Mapping[str, Any]], outcomes: Sequence[Mapping[str, Any]], *, n_trials: int=1, initial_equity: float=500000.0) ...` -- Compute comprehensive backtest performance and deflated risk statistics.
+- `compute_backtest_stats(equity_curve: Sequence[Mapping[str, Any]], outcomes: Sequence[Mapping[str, Any]], *, n_trials: int=1, initial_equity: float=500000.0, ...` -- Compute comprehensive backtest performance and deflated risk statistics.
 - `class ForwardSimulation`
 - `block_bootstrap_forward(daily_returns: Sequence[float], *, n_trades: int, horizon: int=252, n_paths: int=2000, hold_sessions: int=10, seed: int=20261111, n_b...` -- Stationary block bootstrap (Politis & Romano 1994) of one-year outcomes.
 
@@ -453,10 +458,14 @@ Capital-protection rules. Pure functions, no I/O, so every one is testable.
 - `class Position`
   - `notional(self) -> float`
   - `risk_rupees(self) -> float` -- Rupees still at risk to the CURRENT resting stop, floored at zero.
+  - `principal_risk_rupees(self) -> float` -- Principal capital at risk to the resting stop; zero once trailed above entry.
 - `class Portfolio`
   - `deployed(self) -> float`
   - `heat(self) -> float`
   - `heat_pct(self) -> float`
+  - `principal_heat(self) -> float`
+  - `principal_heat_pct(self) -> float`
+  - `industry_heat(self, industry: str) -> float`
   - `drawdown_pct(self) -> float`
   - `industry_notional(self, industry: str) -> float`
   - `industry_names(self, industry: str) -> int`
@@ -468,6 +477,10 @@ Capital-protection rules. Pure functions, no I/O, so every one is testable.
   - `headroom_pct(self) -> float | None`
 - `evaluate_entry(pf: Portfolio, c: Candidate, *, regime: Regime=Regime.UNKNOWN, cfg: RiskConfig=DEFAULT, halted: bool=False) -> Decision` -- Decide whether `c` may be opened, and at what size.
 - `rule_states(pf: Portfolio, *, regime: Regime=Regime.UNKNOWN, cfg: RiskConfig=DEFAULT) -> list[RuleStatus]` -- Current status of every book-level rule, for the dashboard.
+- `class TieredRiskConfig` -- 4-Tier Hierarchical Risk Engine configuration proven in out-of-sample simulation.
+- `tiered_regime_caps(regime: Regime, *, breadth_above_sma50: float=0.5, cfg: TieredRiskConfig=TIERED_DEFAULT) -> dict[str, float]` -- Regime-conditional dynamic slot and heat envelope for the 4-Tier Risk Engine.
+- `evaluate_tiered_entry(pf: Portfolio, c: Candidate, *, regime: Regime=Regime.TREND_UP, breadth_above_sma50: float=0.5, candidate_beta: float=1.0, portfolio_be...` -- Evaluate candidate under the 4-Tier Hierarchical Risk Engine (`<= 7.0%` portfolio heat).
+- `clamp_portfolio_principal_heat(pf: Portfolio, *, max_heat_pct: float=0.069) -> tuple[Position, ...]` -- Proportionally tighten resting stops when principal heat drifts above `max_heat_pct`.
 
 ## packages/llm
 

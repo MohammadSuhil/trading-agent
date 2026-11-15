@@ -18,9 +18,13 @@ from ta_ledger.risk import (
     Candidate,
     Portfolio,
     Position,
+    TIERED_DEFAULT,
+    clamp_portfolio_principal_heat,
     evaluate_entry,
+    evaluate_tiered_entry,
     regime_caps,
     rule_states,
+    tiered_regime_caps,
 )
 from ta_quant.pipeline import run_nightly
 
@@ -334,4 +338,91 @@ def test_run_nightly_computes_pair_corr_and_triggers_risk_08():
     )
     assert b_rejections.height >= 1
     assert "PAIR_CORRELATION" in b_rejections["reason"].to_list()
+
+
+# ------------------------------------------------ 4-Tier Hierarchical Risk Engine
+def test_tiered_entry_unlocks_three_names_in_industry_but_rejects_fourth():
+    """Tier 3 permits up to 3 uncorrelated stocks in a leading industry within 3% sector heat."""
+    p1 = Position("CAP1", "Capital Goods", qty=40, entry=1000.0, last=1000.0, stop=940.0, opened=date(2026, 10, 1))
+    p2 = Position("CAP2", "Capital Goods", qty=40, entry=1000.0, last=1000.0, stop=940.0, opened=date(2026, 10, 2))
+    pf2 = Portfolio(equity=EQ, cash=EQ - 80_000.0, watermark=EQ, positions=(p1, p2))
+
+    # 3rd name in Capital Goods is allowed (headroom remains under 25% notional and 3.0% heat)
+    d3 = evaluate_tiered_entry(pf2, good("CAP3", industry="Capital Goods"), regime=Regime.TREND_UP)
+    assert d3.allowed
+    assert d3.qty > 0
+    assert d3.risk_rupees <= EQ * TIERED_DEFAULT.risk_per_trade_ceiling_pct
+
+    # 4th name in Capital Goods is rejected by Tier 3 name cap
+    p3 = Position("CAP3", "Capital Goods", qty=d3.qty, entry=1000.0, last=1000.0, stop=940.0, opened=date(2026, 10, 3))
+    pf3 = Portfolio(equity=EQ, cash=pf2.cash - d3.notional, watermark=EQ, positions=(p1, p2, p3))
+    d4 = evaluate_tiered_entry(pf3, good("CAP4", industry="Capital Goods"), regime=Regime.TREND_UP)
+    assert d4.action is RuleAction.REJECT
+    assert d4.rule_id == "RISK-06"
+
+
+def test_tiered_entry_rejects_excess_industry_heat():
+    """Even with <=2 names, reaching >= 3.0% industry principal heat rejects a 3rd entry."""
+    hot_cap = Position(
+        "HOT", "Chemicals", qty=250, entry=1000.0, last=1000.0, stop=940.0, opened=date(2026, 10, 1)
+    )  # 250 * 60 = Rs 15,000 = 3.0% of Rs 500,000
+    pf = Portfolio(equity=EQ, cash=EQ - 250_000.0, watermark=EQ, positions=(hot_cap,))
+    d = evaluate_tiered_entry(pf, good("CHEM2", industry="Chemicals"), regime=Regime.TREND_UP)
+    assert d.action is RuleAction.REJECT
+    assert d.rule_id == "RISK-06"
+
+
+def test_tiered_correlation_soft_halves_and_hard_rejects():
+    """Tier 4 halves risk sizing at 0.65 <= rho < 0.68 and hard-rejects at rho >= 0.68."""
+    held = pos("INFY", "Information Technology", qty=40, price=1000.0)
+    pf = Portfolio(equity=EQ, cash=EQ * 0.85, watermark=EQ, positions=(held,))
+
+    uncorr = evaluate_tiered_entry(pf, good("BEL", industry="Capital Goods"), regime=Regime.TREND_UP)
+    soft = evaluate_tiered_entry(
+        pf,
+        Candidate(
+            "TCS", "Capital Goods", price=1000.0, stop=940.0, target=1150.0,
+            adtv_rupees=5e8, n_trades=50_000, listed_sessions=900, pair_corr={"INFY": 0.66},
+        ),
+        regime=Regime.TREND_UP,
+    )
+    hard = evaluate_tiered_entry(
+        pf,
+        Candidate(
+            "HCLTECH", "Capital Goods", price=1000.0, stop=940.0, target=1150.0,
+            adtv_rupees=5e8, n_trades=50_000, listed_sessions=900, pair_corr={"INFY": 0.70},
+        ),
+        regime=Regime.TREND_UP,
+    )
+    assert uncorr.allowed and soft.allowed
+    assert soft.action is RuleAction.RESIZE
+    assert soft.risk_rupees < uncorr.risk_rupees
+    assert hard.action is RuleAction.REJECT
+    assert hard.rule_id == "RISK-08"
+
+
+def test_tiered_portfolio_heat_and_beta_caps_bind():
+    """Tier 1 strictly caps principal heat <= 7.0%; Tier 4 enforces portfolio beta <= 1.35."""
+    # 7 positions each risking 1.0% -> principal_heat_pct = 7.0% (> 6.85% Tier-1 cap)
+    hot_positions = tuple(
+        Position(f"S{i}", f"IND{i}", qty=84, entry=1000.0, last=1000.0, stop=940.0, opened=date(2026, 10, 1))
+        for i in range(7)
+    )
+    pf_hot = Portfolio(equity=EQ, cash=EQ * 0.4, watermark=EQ, positions=hot_positions)
+    d_heat = evaluate_tiered_entry(pf_hot, good("NEW", industry="Power"), regime=Regime.TREND_UP)
+    assert d_heat.action is RuleAction.REJECT
+    assert d_heat.rule_id == "RISK-04"
+
+    # Clamping principal heat strictly pulls book back <= 6.90%
+    clamped = clamp_portfolio_principal_heat(pf_hot, max_heat_pct=0.0690)
+    pf_clamped = replace(pf_hot, positions=clamped)
+    assert pf_clamped.principal_heat_pct <= 0.0690 + 1e-9
+
+    # Beta cap: already at 1.35 portfolio beta -> reject any further positive-beta addition
+    d_beta = evaluate_tiered_entry(
+        flat(), good("BETA", industry="Power"), regime=Regime.TREND_UP, candidate_beta=1.2, portfolio_beta=1.35
+    )
+    assert d_beta.action is RuleAction.REJECT
+    assert d_beta.rule_id == "RISK-10"
+    assert tiered_regime_caps(Regime.TREND_DOWN)["slots"] == 6.0
 

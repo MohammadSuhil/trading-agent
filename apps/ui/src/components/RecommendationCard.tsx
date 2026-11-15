@@ -58,6 +58,13 @@ export function PlanRail({ r }: { r: RecommendationRow }) {
   );
 }
 
+export function extractRank(r: RecommendationRow): number | null {
+  const m = text(r.afford_note, '').match(/rank #(\d+)/i)?.[1];
+  if (!m) return null;
+  const n = Number(m);
+  return Number.isFinite(n) && n > 0 && n <= 10_000 ? n : null;
+}
+
 export function entryBand(r: RecommendationRow): string {
   if (isNum(r.entry_lo) && isNum(r.entry_hi)) return `${price(r.entry_lo)} ${EN_DASH} ${price(r.entry_hi)}`;
   if (isNum(r.entry_lo)) return price(r.entry_lo);
@@ -120,25 +127,28 @@ export function ConfidencePill({ r, compact = false }: { r: RecommendationRow; c
 export function SizeBlock({ r, dense = false }: { r: RecommendationRow; dense?: boolean }) {
   const spec = actionSpec(r.action);
   const advising = spec?.code === 'BUY' || spec?.code === 'TRIM' || spec?.code === 'SELL' || (isNum(r.qty) && r.qty > 0);
+  const note = text(r.afford_note, '');
 
   if (advising) {
     return (
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="tnum text-[18px] font-semibold leading-none text-ink">
-          {count(r.qty)} <span className="text-[12px] font-medium text-ink2">sh</span>
-        </span>
-        <span className="tnum text-[14px] font-semibold leading-none text-ink2">{inr(r.notional)}</span>
-        <span className="tnum text-[11.5px] text-muted">
-          <TermLabel code="risk" className="mr-1 normal-case tracking-normal" />
-          {inr(r.risk_rupees)}
-          {isNum(r.risk_pct) && <span className="ml-1">({pctFrac(r.risk_pct)})</span>}
-        </span>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <span className="tnum text-[18px] font-semibold leading-none text-ink">
+            {count(r.qty)} <span className="text-[12px] font-medium text-ink2">sh</span>
+          </span>
+          <span className="tnum text-[14px] font-semibold leading-none text-ink2">{inr(r.notional)}</span>
+          <span className="tnum text-[11.5px] text-muted">
+            <TermLabel code="risk" className="mr-1 normal-case tracking-normal" />
+            {inr(r.risk_rupees)}
+            {isNum(r.risk_pct) && <span className="ml-1">({pctFrac(r.risk_pct)})</span>}
+          </span>
+        </div>
+        {note && !dense && <p className="mt-1 text-[10.5px] leading-tight text-muted">{note}</p>}
       </div>
     );
   }
 
   const hasWould = isNum(r.would_qty) || isNum(r.would_notional);
-  const note = text(r.afford_note, '');
 
   return (
     <div className="min-w-0">
@@ -280,6 +290,7 @@ export function RecommendationCard({
   const reasons = (r.reasons ?? []).filter((c): c is string => typeof c === 'string' && c.length > 0);
   const dense = density === 'compact';
   const canBuy = ((isNum(r.qty) && r.qty > 0) || (isNum(r.would_qty) && r.would_qty > 0)) && !isOwned;
+  const rank = extractRank(r);
 
   return (
     <article className="panel relative overflow-hidden transition-shadow hover:shadow-raise">
@@ -371,6 +382,7 @@ export function RecommendationCard({
           <div className="flex flex-wrap items-center gap-1.5">
             <ConfidencePill r={r} />
             <TagChip value={r.sleeve} plain />
+            {rank !== null && <Pill tone="quiet">Rank #{rank}</Pill>}
           </div>
           <TrendPair stock={r.trend_63} industry={r.ind_trend_63} className="shrink-0" />
         </div>

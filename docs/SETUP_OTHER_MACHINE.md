@@ -4,13 +4,6 @@ This document details how to sync and run all schema changes, data ingestion, ta
 
 ---
 
-## 1. Code & Environment Setup
-
-```bash
-# 1. Fetch latest branch and checkout
-git fetch origin
-git checkout fix/backtest-pit-baseline-equity-chart
-git pull
 
 # 2. Sync pinned Python 3.13 dependencies
 uv sync --frozen

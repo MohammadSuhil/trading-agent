@@ -277,7 +277,7 @@ function SystemIntegrityPanel({
   // frozen control is only the yardstick, shown in the comparison table below.
   const live = data?.comparison?.same_window ? data.comparison : null;
   const head = {
-    label: live ? 'Live rules (v2)' : 'Frozen control — live rules not run for this window',
+    label: live ? 'Live rules (v2 MetaVoter + 4-Tier Risk)' : 'Frozen control — live rules not run for this window',
     final_equity: live ? live.final_equity : data?.final_equity,
     total_return_pct: live ? live.total_return_pct : data?.total_return_pct,
     sharpe: live ? live.sharpe : data?.sharpe,
@@ -516,7 +516,7 @@ function SystemIntegrityPanel({
                   comparisonCurve={data?.comparison?.curve ?? []}
                   labels={{
                     primary: 'Frozen control',
-                    comparison: 'Live rules (v2 Sortino-Mom)',
+                    comparison: 'Live rules (v2 MetaVoter + 4-Tier Risk)',
                     benchmark: 'Nifty 500 index (price, rebased)',
                   }}
                   mode={mode}
@@ -560,7 +560,7 @@ function ComparisonNotes({ data }: { data: Backtest | null }) {
     rows.push({
       key: 'variant',
       swatch: <span className="inline-block w-4 border-b-2 border-dashed border-warning" />,
-      label: <Term code="REGIME_FILTER"><span>Live rules (v2 Sortino-Mom)</span></Term>,
+      label: <Term code="REGIME_FILTER"><span>Live rules (v2 MetaVoter + 4-Tier Risk)</span></Term>,
       ret: c.total_return_pct ?? null, equity: c.final_equity ?? null, trades: c.n_trades ?? null,
       sharpe: c.sharpe ?? null, dd: c.max_drawdown ?? null, win: c.win_rate ?? null,
       excess: c.excess_return_pct ?? null,
@@ -619,8 +619,16 @@ function ComparisonNotes({ data }: { data: Backtest | null }) {
           the day-1 rules, locked forever. Every change must beat this line to count.
         </li>
         <li>
-          <b className="text-ink">Live rules (v2 Sortino-Mom)</b> <TermInfo code="REGIME_FILTER" className="ml-0.5 align-middle" /> —
-          cross-sectional Sortino risk-adjusted momentum (0.45 × z-score of 12-month momentum, 0.35 × 126-day return, 0.20 × distance-to-52-week-high, all normalized by 252-day downside semideviation), evaluated on the survivorship-free point-in-time Top-350 liquid NSE EQ universe. Anchored monthly rebalance holds winners ranked ≤ 25 or above SMA200; daily protection via 12.5% initial stop, 18% trailing after +8% gain, and residual correlation gates. Won a pre-registered backtest against the frozen control: OOS 2021–07 +135.18% vs Nifty 500 +106.34% (5/5 starts, SR 1.05, DD 24%); IS 2025-07–2026-11 +46.33% vs +1.97% (5/5 starts, SR 1.61, DD 13.7%). Evaluated over n_trials = 36 (five start dates × six time windows, full Indian delivery costs).
+          <b className="text-ink">Live rules (v2 MetaVoter + 4-Tier Risk)</b> <TermInfo code="REGIME_FILTER" className="ml-0.5 align-middle" /> —
+          5-variant orthogonal ensemble (<Term code="V1_Baseline_Sortino"><span>V1</span></Term>,{' '}
+          <Term code="V2_Residual_Alpha_HAC"><span>V2</span></Term>,{' '}
+          <Term code="V3_OU_Residual_Reversion"><span>V3</span></Term>,{' '}
+          <Term code="V4_VolCompression_Barrier"><span>V4</span></Term>,{' '}
+          <Term code="V5_Defensive_CrisisShield"><span>V5</span></Term>) gated by a 4-state causal Hurst/VIX macro regime classifier and evaluated on the survivorship-free point-in-time Top-350 liquid NSE EQ universe.
+          Protected by the 4-Tier Hierarchical Risk Engine (<Term code="TIER-01"><span>TIER-01</span></Term>,{' '}
+          <Term code="TIER-02"><span>TIER-02</span></Term>,{' '}
+          <Term code="TIER-03"><span>TIER-03</span></Term>,{' '}
+          <Term code="TIER-04"><span>TIER-04</span></Term>): up to 12 concurrent positions, max 3 stocks and 3.0% open risk per industry, ≤ 7.0% total principal portfolio heat with daily stop ratchet, and a 60-day residual correlation gate. Evaluated over n_trials = 5 ensemble variants with full Indian delivery costs.
           {!sameWindow && (
             <span className="text-warning-ink">
               {' '}

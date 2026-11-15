@@ -1,0 +1,705 @@
+{
+  "generated_at": "2026-11-15T10:35:35.201792+00:00",
+  "elapsed_sec": 20.82,
+  "system_capabilities": {
+    "bars_1d_sources": [
+      {
+        "source": "nse_legacy",
+        "min_d": "2019-01-01",
+        "max_d": "2024-07-05",
+        "n_days": 1367,
+        "n_rows": 2504118
+      },
+      {
+        "source": "nse_udiff",
+        "min_d": "2024-07-08",
+        "max_d": "2026-11-13",
+        "n_days": 585,
+        "n_rows": 1433132
+      }
+    ],
+    "pure_nse_only": true,
+    "total_official_indices": 174,
+    "key_benchmark_indices": [
+      {
+        "index_name": "India VIX",
+        "min_d": "2019-01-01",
+        "max_d": "2026-11-13",
+        "n_days": 1947
+      },
+      {
+        "index_name": "Nifty 10 yr Benchmark G-Sec",
+        "min_d": "2019-01-01",
+        "max_d": "2026-11-13",
+        "n_days": 1947
+      },
+      {
+        "index_name": "Nifty 1D Rate Index",
+        "min_d": "2019-01-01",
+        "max_d": "2026-11-13",
+        "n_days": 1947
+      },
+      {
+        "index_name": "Nifty 50",
+        "min_d": "2019-01-01",
+        "max_d": "2026-11-13",
+        "n_days": 1947
+      },
+      {
+        "index_name": "Nifty 500",
+        "min_d": "2019-01-01",
+        "max_d": "2026-11-13",
+        "n_days": 1947
+      }
+    ],
+    "price_factor_count": 72,
+    "price_factors_sample": [
+      "ret_1d",
+      "ret_5d",
+      "ret_21d",
+      "ret_63d",
+      "ret_126d",
+      "ret_252d",
+      "mom_12_1",
+      "sma20",
+      "sma50",
+      "sma200",
+      "ma_stack",
+      "atr14",
+      "realised_vol_21d",
+      "rsi14",
+      "adx14",
+      "bb_z",
+      "dist_52w_high",
+      "dist_52w_low",
+      "rvol_20",
+      "adtv_20",
+      "dvol_252",
+      "adtv_126",
+      "ret_2d",
+      "ret_3d",
+      "ret_10d",
+      "ret_42d",
+      "mom_3_1",
+      "mom_6_1",
+      "overnight_ret_1d",
+      "intraday_ret_1d",
+      "overnight_ret_21d",
+      "intraday_ret_21d",
+      "sma10",
+      "sma100",
+      "ema12",
+      "ema26",
+      "macd_line",
+      "macd_signal",
+      "macd_hist",
+      "price_to_sma20",
+      "price_to_sma50",
+      "price_to_sma200",
+      "atr7",
+      "atr21",
+      "atr_pct",
+      "realised_vol_5d",
+      "realised_vol_63d",
+      "realised_vol_252d",
+      "vol_ratio_5_21",
+      "parkinson_vol_21d",
+      "daily_range_pct",
+      "close_in_range",
+      "max_dd_63d",
+      "max_dd_252d",
+      "rsi7",
+      "rsi21",
+      "stoch_k_14",
+      "stoch_d_14",
+      "williams_r_14",
+      "bb_width_20",
+      "ret_z_20",
+      "up_days_20",
+      "rvol_5",
+      "rvol_63",
+      "adtv_5",
+      "adtv_63",
+      "turnover_ratio_5_20",
+      "turnover_z_20",
+      "amihud_21d",
+      "avg_trade_size",
+      "trade_count_rvol_20",
+      "up_down_vol_ratio_20"
+    ],
+    "trend_features": [
+      "trend_20",
+      "trend_63",
+      "trend_252",
+      "t_drift_20",
+      "t_drift_63",
+      "t_drift_252",
+      "er_20",
+      "er_63",
+      "er_252",
+      "adx_delta_10",
+      "flips_63d"
+    ],
+    "risk_correlation": "ResidualCorrelationIndex (63d cross-sectionally demeaned residual Pearson rho)",
+    "barrier_model": "BarrierModel (252d empirical triple-barrier Dirichlet posterior conditioned on ATR% tercile, pessimistic same-bar DOWN)",
+    "ml_module_status": "ta_quant/ml/__init__.py empty stub (ml_prob=None; ready for Dirichlet meta-labeling & regime probability weighting)",
+    "legacy_risk_defaults": {
+      "max_positions": 7,
+      "max_positions_backstop": 9,
+      "risk_per_trade_pct": 0.008,
+      "risk_per_trade_ceiling_pct": 0.01,
+      "max_portfolio_heat_pct": 0.06,
+      "max_industry_names": 2,
+      "max_industry_pct": 0.25,
+      "max_pair_residual_corr": 0.65
+    }
+  },
+  "data_range": {
+    "bars_loaded_sessions": 1600,
+    "active_1250_start": "2021-11-01",
+    "active_1250_end": "2026-11-13",
+    "macro_regime_distribution_1250": [
+      {
+        "macro_regime": "SIDEWAYS_CHOP",
+        "len": 700
+      },
+      {
+        "macro_regime": "BEAR_HIGH_VOL_SHOCK",
+        "len": 259
+      },
+      {
+        "macro_regime": "LOW_VOL_TREND",
+        "len": 206
+      },
+      {
+        "macro_regime": "HIGH_VOL_TREND",
+        "len": 80
+      }
+    ]
+  },
+  "psr_dsr_audit": {
+    "n_obs": 1250,
+    "sr_obs_daily": 0.04483,
+    "skew_gamma3": -0.032923,
+    "kurt_pearson_fisher_false": 3.047808,
+    "psr_max_abs_diff": 0.0,
+    "sr0_n36_max_abs_diff": 5.764028143673272e-12,
+    "dsr_max_abs_diff": 5.86954929104877e-11,
+    "sr0_n36_daily": 0.067641,
+    "sr0_n36_annualised": 1.0738
+  },
+  "v2_windows": {
+    "1250": {
+      "sessions": 1250,
+      "n_returns": 1249,
+      "total_return_pct": 177.91,
+      "cagr_pct": 22.88,
+      "daily_sr": 0.06969,
+      "sharpe_annualised": 1.1062,
+      "psr": 0.9911,
+      "dsr_n36": 0.5277,
+      "sr0_n36_daily": 0.06764,
+      "sr0_n36_ann": 1.074,
+      "max_dd_pct": 27.23,
+      "calmar": 0.84,
+      "trades": 185,
+      "win_rate_pct": 42.16,
+      "profit_factor": 1.6453,
+      "expectancy_r": 0.3811,
+      "regime_attribution": {
+        "LOW_VOL_TREND": {
+          "sessions": 206,
+          "pct_of_sessions": 16.49,
+          "compounded_return_pct": 28.06,
+          "daily_sr": 0.10975,
+          "annualised_sharpe": 1.742,
+          "in_regime_max_dd_pct": 11.6,
+          "trades_entered": 27,
+          "win_rate_pct": 37.04,
+          "profit_factor": 0.967,
+          "avg_r_multiple": 0.017,
+          "whipsaw_14cd_rate_pct": 14.81
+        },
+        "HIGH_VOL_TREND": {
+          "sessions": 79,
+          "pct_of_sessions": 6.33,
+          "compounded_return_pct": 26.92,
+          "daily_sr": 0.21885,
+          "annualised_sharpe": 3.474,
+          "in_regime_max_dd_pct": 5.92,
+          "trades_entered": 19,
+          "win_rate_pct": 31.58,
+          "profit_factor": 1.016,
+          "avg_r_multiple": 0.075,
+          "whipsaw_14cd_rate_pct": 36.84
+        },
+        "SIDEWAYS_CHOP": {
+          "sessions": 700,
+          "pct_of_sessions": 56.04,
+          "compounded_return_pct": 206.49,
+          "daily_sr": 0.14538,
+          "annualised_sharpe": 2.308,
+          "in_regime_max_dd_pct": 11.68,
+          "trades_entered": 87,
+          "win_rate_pct": 47.13,
+          "profit_factor": 1.883,
+          "avg_r_multiple": 0.367,
+          "whipsaw_14cd_rate_pct": 17.24
+        },
+        "BEAR_HIGH_VOL_SHOCK": {
+          "sessions": 259,
+          "pct_of_sessions": 20.74,
+          "compounded_return_pct": -43.9,
+          "daily_sr": -0.12584,
+          "annualised_sharpe": -1.998,
+          "in_regime_max_dd_pct": 53.67,
+          "trades_entered": 52,
+          "win_rate_pct": 40.38,
+          "profit_factor": 1.919,
+          "avg_r_multiple": 0.706,
+          "whipsaw_14cd_rate_pct": 32.69
+        }
+      }
+    },
+    "760": {
+      "sessions": 760,
+      "n_returns": 759,
+      "total_return_pct": 106.08,
+      "cagr_pct": 27.1,
+      "daily_sr": 0.07972,
+      "sharpe_annualised": 1.2655,
+      "psr": 0.982,
+      "dsr_n36": 0.5186,
+      "sr0_n36_daily": 0.07795,
+      "sr0_n36_ann": 1.237,
+      "max_dd_pct": 24.41,
+      "calmar": 1.11,
+      "trades": 105,
+      "win_rate_pct": 42.86,
+      "profit_factor": 1.743,
+      "expectancy_r": 0.4832,
+      "regime_attribution": {
+        "LOW_VOL_TREND": {
+          "sessions": 56,
+          "pct_of_sessions": 7.38,
+          "compounded_return_pct": 7.56,
+          "daily_sr": 0.12129,
+          "annualised_sharpe": 1.925,
+          "in_regime_max_dd_pct": 7.51,
+          "trades_entered": 5,
+          "win_rate_pct": 60.0,
+          "profit_factor": 1.832,
+          "avg_r_multiple": 0.367,
+          "whipsaw_14cd_rate_pct": 20.0
+        },
+        "HIGH_VOL_TREND": {
+          "sessions": 67,
+          "pct_of_sessions": 8.83,
+          "compounded_return_pct": 34.46,
+          "daily_sr": 0.33616,
+          "annualised_sharpe": 5.336,
+          "in_regime_max_dd_pct": 4.94,
+          "trades_entered": 13,
+          "win_rate_pct": 23.08,
+          "profit_factor": 0.292,
+          "avg_r_multiple": -0.439,
+          "whipsaw_14cd_rate_pct": 46.15
+        },
+        "SIDEWAYS_CHOP": {
+          "sessions": 446,
+          "pct_of_sessions": 58.76,
+          "compounded_return_pct": 103.01,
+          "daily_sr": 0.15299,
+          "annualised_sharpe": 2.429,
+          "in_regime_max_dd_pct": 9.19,
+          "trades_entered": 52,
+          "win_rate_pct": 51.92,
+          "profit_factor": 2.478,
+          "avg_r_multiple": 0.593,
+          "whipsaw_14cd_rate_pct": 19.23
+        },
+        "BEAR_HIGH_VOL_SHOCK": {
+          "sessions": 185,
+          "pct_of_sessions": 24.37,
+          "compounded_return_pct": -29.45,
+          "daily_sr": -0.09968,
+          "annualised_sharpe": -1.582,
+          "in_regime_max_dd_pct": 41.17,
+          "trades_entered": 35,
+          "win_rate_pct": 34.29,
+          "profit_factor": 1.782,
+          "avg_r_multiple": 0.68,
+          "whipsaw_14cd_rate_pct": 34.29
+        }
+      }
+    },
+    "250": {
+      "sessions": 250,
+      "n_returns": 249,
+      "total_return_pct": 45.38,
+      "cagr_pct": 45.82,
+      "daily_sr": 0.11984,
+      "sharpe_annualised": 1.9023,
+      "psr": 0.967,
+      "dsr_n36": 0.4015,
+      "sr0_n36_daily": 0.13609,
+      "sr0_n36_ann": 2.16,
+      "max_dd_pct": 16.01,
+      "calmar": 2.862,
+      "trades": 34,
+      "win_rate_pct": 35.29,
+      "profit_factor": 1.9339,
+      "expectancy_r": 0.5845,
+      "regime_attribution": {
+        "LOW_VOL_TREND": {
+          "sessions": 10,
+          "pct_of_sessions": 4.02,
+          "compounded_return_pct": -5.83,
+          "daily_sr": -0.38568,
+          "annualised_sharpe": -6.123,
+          "in_regime_max_dd_pct": 8.02,
+          "trades_entered": 0,
+          "win_rate_pct": 0.0,
+          "profit_factor": 0.0,
+          "avg_r_multiple": 0.0,
+          "whipsaw_14cd_rate_pct": 0.0
+        },
+        "HIGH_VOL_TREND": {
+          "sessions": 4,
+          "pct_of_sessions": 1.61,
+          "compounded_return_pct": 5.59,
+          "daily_sr": 0.83772,
+          "annualised_sharpe": 13.298,
+          "in_regime_max_dd_pct": 0.64,
+          "trades_entered": 0,
+          "win_rate_pct": 0.0,
+          "profit_factor": 0.0,
+          "avg_r_multiple": 0.0,
+          "whipsaw_14cd_rate_pct": 0.0
+        },
+        "SIDEWAYS_CHOP": {
+          "sessions": 161,
+          "pct_of_sessions": 64.66,
+          "compounded_return_pct": 40.52,
+          "daily_sr": 0.19232,
+          "annualised_sharpe": 3.053,
+          "in_regime_max_dd_pct": 8.63,
+          "trades_entered": 19,
+          "win_rate_pct": 42.11,
+          "profit_factor": 1.666,
+          "avg_r_multiple": 0.306,
+          "whipsaw_14cd_rate_pct": 15.79
+        },
+        "BEAR_HIGH_VOL_SHOCK": {
+          "sessions": 69,
+          "pct_of_sessions": 27.71,
+          "compounded_return_pct": 4.6,
+          "daily_sr": 0.04747,
+          "annualised_sharpe": 0.754,
+          "in_regime_max_dd_pct": 10.95,
+          "trades_entered": 15,
+          "win_rate_pct": 26.67,
+          "profit_factor": 2.215,
+          "avg_r_multiple": 0.937,
+          "whipsaw_14cd_rate_pct": 26.67
+        }
+      }
+    },
+    "120": {
+      "sessions": 120,
+      "n_returns": 119,
+      "total_return_pct": 15.4,
+      "cagr_pct": 35.1,
+      "daily_sr": 0.10097,
+      "sharpe_annualised": 1.6028,
+      "psr": 0.8624,
+      "dsr_n36": 0.15,
+      "sr0_n36_daily": 0.19686,
+      "sr0_n36_ann": 3.125,
+      "max_dd_pct": 8.02,
+      "calmar": 4.377,
+      "trades": 16,
+      "win_rate_pct": 37.5,
+      "profit_factor": 1.1691,
+      "expectancy_r": 0.1116,
+      "regime_attribution": {
+        "LOW_VOL_TREND": {
+          "sessions": 7,
+          "pct_of_sessions": 5.88,
+          "compounded_return_pct": -3.24,
+          "daily_sr": -0.52449,
+          "annualised_sharpe": -8.326,
+          "in_regime_max_dd_pct": 3.56,
+          "trades_entered": 0,
+          "win_rate_pct": 0.0,
+          "profit_factor": 0.0,
+          "avg_r_multiple": 0.0,
+          "whipsaw_14cd_rate_pct": 0.0
+        },
+        "HIGH_VOL_TREND": {
+          "sessions": 4,
+          "pct_of_sessions": 3.36,
+          "compounded_return_pct": 5.77,
+          "daily_sr": 0.77778,
+          "annualised_sharpe": 12.347,
+          "in_regime_max_dd_pct": 0.66,
+          "trades_entered": 0,
+          "win_rate_pct": 0.0,
+          "profit_factor": 0.0,
+          "avg_r_multiple": 0.0,
+          "whipsaw_14cd_rate_pct": 0.0
+        },
+        "SIDEWAYS_CHOP": {
+          "sessions": 86,
+          "pct_of_sessions": 72.27,
+          "compounded_return_pct": 18.54,
+          "daily_sr": 0.16442,
+          "annualised_sharpe": 2.61,
+          "in_regime_max_dd_pct": 5.64,
+          "trades_entered": 13,
+          "win_rate_pct": 46.15,
+          "profit_factor": 1.732,
+          "avg_r_multiple": 0.32,
+          "whipsaw_14cd_rate_pct": 30.77
+        },
+        "BEAR_HIGH_VOL_SHOCK": {
+          "sessions": 17,
+          "pct_of_sessions": 14.29,
+          "compounded_return_pct": -4.11,
+          "daily_sr": -0.17854,
+          "annualised_sharpe": -2.834,
+          "in_regime_max_dd_pct": 9.96,
+          "trades_entered": 3,
+          "win_rate_pct": 0.0,
+          "profit_factor": 0.0,
+          "avg_r_multiple": -0.794,
+          "whipsaw_14cd_rate_pct": 66.67
+        }
+      }
+    }
+  },
+  "worst_drawdowns_1250": [
+    {
+      "start": "2022-01-17",
+      "trough": "2022-07-04",
+      "recovery": "2022-09-12",
+      "dd_pct": 27.23,
+      "dominant_regime": "BEAR_HIGH_VOL_SHOCK"
+    },
+    {
+      "start": "2024-12-16",
+      "trough": "2025-04-07",
+      "recovery": "2026-05-14",
+      "dd_pct": 25.7,
+      "dominant_regime": "BEAR_HIGH_VOL_SHOCK"
+    },
+    {
+      "start": "2024-02-08",
+      "trough": "2024-06-04",
+      "recovery": "2024-12-16",
+      "dd_pct": 22.6,
+      "dominant_regime": "BEAR_HIGH_VOL_SHOCK"
+    },
+    {
+      "start": "2022-12-13",
+      "trough": "2023-03-28",
+      "recovery": "2023-05-05",
+      "dd_pct": 16.07,
+      "dominant_regime": "SIDEWAYS_CHOP"
+    },
+    {
+      "start": "2026-09-10",
+      "trough": "2026-10-23",
+      "recovery": "OPEN",
+      "dd_pct": 8.89,
+      "dominant_regime": "BEAR_HIGH_VOL_SHOCK"
+    }
+  ],
+  "legacy_1pct_and_counterfactuals": {
+    "stats": {
+      "sessions": 1250,
+      "n_returns": 1249,
+      "total_return_pct": 65.53,
+      "cagr_pct": 10.69,
+      "daily_sr": 0.05397,
+      "sharpe_annualised": 0.8567,
+      "psr": 0.968,
+      "dsr_n36": 0.3195,
+      "sr0_n36_daily": 0.06764,
+      "sr0_n36_ann": 1.074,
+      "max_dd_pct": 18.78,
+      "calmar": 0.569,
+      "trades": 192,
+      "win_rate_pct": 41.67,
+      "profit_factor": 1.4685,
+      "expectancy_r": 0.2858
+    },
+    "max_open_risk_pct": 10.5,
+    "regime_attribution": {
+      "LOW_VOL_TREND": {
+        "sessions": 206,
+        "pct_of_sessions": 16.49,
+        "compounded_return_pct": 12.13,
+        "daily_sr": 0.07624,
+        "annualised_sharpe": 1.21,
+        "in_regime_max_dd_pct": 9.22,
+        "trades_entered": 28,
+        "win_rate_pct": 32.14,
+        "profit_factor": 0.741,
+        "avg_r_multiple": -0.082,
+        "whipsaw_14cd_rate_pct": 14.29
+      },
+      "HIGH_VOL_TREND": {
+        "sessions": 79,
+        "pct_of_sessions": 6.33,
+        "compounded_return_pct": 12.0,
+        "daily_sr": 0.18118,
+        "annualised_sharpe": 2.876,
+        "in_regime_max_dd_pct": 3.88,
+        "trades_entered": 19,
+        "win_rate_pct": 31.58,
+        "profit_factor": 1.617,
+        "avg_r_multiple": 0.299,
+        "whipsaw_14cd_rate_pct": 31.58
+      },
+      "SIDEWAYS_CHOP": {
+        "sessions": 700,
+        "pct_of_sessions": 56.04,
+        "compounded_return_pct": 80.91,
+        "daily_sr": 0.11948,
+        "annualised_sharpe": 1.897,
+        "in_regime_max_dd_pct": 7.62,
+        "trades_entered": 98,
+        "win_rate_pct": 46.94,
+        "profit_factor": 1.309,
+        "avg_r_multiple": 0.178,
+        "whipsaw_14cd_rate_pct": 15.31
+      },
+      "BEAR_HIGH_VOL_SHOCK": {
+        "sessions": 259,
+        "pct_of_sessions": 20.74,
+        "compounded_return_pct": -27.24,
+        "daily_sr": -0.11749,
+        "annualised_sharpe": -1.865,
+        "in_regime_max_dd_pct": 34.27,
+        "trades_entered": 47,
+        "win_rate_pct": 40.43,
+        "profit_factor": 2.05,
+        "avg_r_multiple": 0.724,
+        "whipsaw_14cd_rate_pct": 31.91
+      }
+    },
+    "rejected_summary": {
+      "SECTOR_CAP_1PCT": {
+        "count": 274,
+        "win_rate_pct": 40.15,
+        "avg_ret_pct": 2.892,
+        "avg_r": 0.242,
+        "total_pnl_on_65k": 515135.4
+      },
+      "SLOT_FULL_7_STOCKS": {
+        "count": 553,
+        "win_rate_pct": 39.24,
+        "avg_ret_pct": 0.245,
+        "avg_r": 0.032,
+        "total_pnl_on_65k": 88069.8
+      },
+      "CORR_CAP": {
+        "count": 1,
+        "win_rate_pct": 100.0,
+        "avg_ret_pct": 17.409,
+        "avg_r": 1.623,
+        "total_pnl_on_65k": 11315.85
+      }
+    },
+    "rejected_overall": {
+      "count": 828,
+      "win_rate_pct": 39.61,
+      "avg_ret_pct": 1.142,
+      "avg_r": 0.103,
+      "total_pnl_on_65k": 614521.05
+    },
+    "top_missed_industries": [
+      {
+        "industry": "Capital Goods",
+        "count": 171,
+        "win_rate_pct": 48.54,
+        "avg_ret_pct": 5.338,
+        "avg_r": 0.441,
+        "total_pnl_on_65k": 593310.25
+      },
+      {
+        "industry": "Chemicals",
+        "count": 36,
+        "win_rate_pct": 47.22,
+        "avg_ret_pct": 5.902,
+        "avg_r": 0.466,
+        "total_pnl_on_65k": 138117.85
+      },
+      {
+        "industry": "Construction",
+        "count": 17,
+        "win_rate_pct": 58.82,
+        "avg_ret_pct": 12.43,
+        "avg_r": 0.966,
+        "total_pnl_on_65k": 137355.4
+      },
+      {
+        "industry": "Automobile and Auto Components",
+        "count": 61,
+        "win_rate_pct": 44.26,
+        "avg_ret_pct": 1.92,
+        "avg_r": 0.169,
+        "total_pnl_on_65k": 76130.6
+      },
+      {
+        "industry": "Consumer Durables",
+        "count": 21,
+        "win_rate_pct": 47.62,
+        "avg_ret_pct": 2.701,
+        "avg_r": 0.238,
+        "total_pnl_on_65k": 36872.55
+      },
+      {
+        "industry": "Healthcare",
+        "count": 59,
+        "win_rate_pct": 47.46,
+        "avg_ret_pct": 0.905,
+        "avg_r": 0.086,
+        "total_pnl_on_65k": 34710.65
+      },
+      {
+        "industry": "Financial Services",
+        "count": 142,
+        "win_rate_pct": 36.62,
+        "avg_ret_pct": 0.31,
+        "avg_r": 0.034,
+        "total_pnl_on_65k": 28568.8
+      },
+      {
+        "industry": "Realty",
+        "count": 10,
+        "win_rate_pct": 40.0,
+        "avg_ret_pct": 3.785,
+        "avg_r": 0.311,
+        "total_pnl_on_65k": 24604.45
+      },
+      {
+        "industry": "Services",
+        "count": 4,
+        "win_rate_pct": 50.0,
+        "avg_ret_pct": 6.878,
+        "avg_r": 0.546,
+        "total_pnl_on_65k": 17882.8
+      },
+      {
+        "industry": "Fast Moving Consumer Goods",
+        "count": 21,
+        "win_rate_pct": 47.62,
+        "avg_ret_pct": 0.778,
+        "avg_r": 0.069,
+        "total_pnl_on_65k": 10621.0
+      }
+    ]
+  }
+}

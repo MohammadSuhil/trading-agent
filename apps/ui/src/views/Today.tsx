@@ -18,11 +18,12 @@ import {
   CardDetails,
   ConfidencePill,
   entryBand,
+  extractRank,
   type Density,
 } from '../components/RecommendationCard';
 import { ActionBadge, ACTION_ORDER, ACTIONS, actionRail, actionSpec, type ActionCode } from '../components/action';
 import { RegimeChip, RuleStateChip, TriSourceChip } from '../components/StateChip';
-import { Kpi, PillTabs, SectionHead, type Tab } from '../components/ui';
+import { Kpi, Pill, PillTabs, SectionHead, type Tab } from '../components/ui';
 import { TrendPairInline } from '../components/trend';
 import { Chip, Delta, Empty, Meter, Panel, SegmentedBar, cn } from '../components/primitives';
 import { Term, TermLabel, TermText } from '../components/Tooltip';
@@ -194,6 +195,7 @@ function ListRow({
   buying?: boolean;
 }) {
   const canBuy = ((isNum(r.qty) && r.qty > 0) || (isNum(r.would_qty) && r.would_qty > 0)) && !isOwned;
+  const rank = extractRank(r);
 
   return (
     <li className={cn('relative border-b border-line last:border-0', open && 'bg-sunken/60')}>
@@ -220,6 +222,7 @@ function ListRow({
           <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <ActionBadge value={r.action} size="sm" />
             <ConfidencePill r={r} compact />
+            {rank !== null && <Pill tone="quiet">#{rank}</Pill>}
             {/* The stock's trend against its industry's, at the primary
                 horizon. The contrast between the two is the signal. */}
             <TrendPairInline stock={r.trend_63} industry={r.ind_trend_63} />

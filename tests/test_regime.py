@@ -6,7 +6,16 @@ from datetime import date, timedelta
 import polars as pl
 import pytest
 from ta_core.enums import Regime
-from ta_quant.regime import INDEX_BEAR, LOOSEN_AFTER, REGIME_INDEX, regime_on, regime_series
+from ta_quant.regime import (
+    INDEX_BEAR,
+    LOOSEN_AFTER,
+    REGIME_INDEX,
+    MacroRegime,
+    classify_macro_regime_panel,
+    compute_hurst_rs,
+    regime_on,
+    regime_series,
+)
 
 
 def _index(closes: list[float]) -> pl.DataFrame:
@@ -154,3 +163,43 @@ def test_live_strategy_is_adr_0007_v2_challenger() -> None:
 
     assert nightly.LIVE_STRATEGY_VERSION == "v2"
     assert nightly.LIVE_ENTRY_BLOCK is None
+
+
+def test_macro_regime_hurst_and_panel_causality() -> None:
+    """MacroRegime + Hurst R/S + causal 4-state panel classifier."""
+    import math
+    from ta_quant.challenger import compute_multivariant_bonus
+    from ta_quant.stats import compute_empirical_trial_dsr
+
+    trending_r = [0.002 + 0.005 * math.sin(i / 25.0) for i in range(100)]
+    choppy_r = [0.015 if i % 2 == 0 else -0.0145 for i in range(100)]
+    assert 0.05 <= compute_hurst_rs(trending_r) <= 0.95
+    assert compute_hurst_rs(choppy_r) < compute_hurst_rs(trending_r)
+    assert compute_hurst_rs([0.01] * 20) == 0.5
+
+    # Clean persistent uptrend reaches LOW_VOL_TREND; sharp downturn reaches BEAR_HIGH_VOL_SHOCK
+    up_closes = [100.0 * (1.0025 ** i) for i in range(260)]
+    down_tail = [up_closes[-1] * (0.985 ** (j + 1)) for j in range(45)]
+    idx_df = _index(up_closes + down_tail)
+    dates = idx_df["d"].to_list()
+    vix_vals = [18.0 - 0.02 * i for i in range(260)] + [26.0 + 0.2 * j for j in range(45)]
+    vix_df = pl.DataFrame({"d": dates, "index_name": ["India VIX"] * len(dates), "close": vix_vals})
+    breadth = {d: (0.72 if i < 260 else 0.25) for i, d in enumerate(dates)}
+
+    full_panel = classify_macro_regime_panel(idx_df, vix_df, breadth_by_date=breadth)
+    assert full_panel.height == len(dates)
+    assert full_panel["macro_regime"][259] == MacroRegime.LOW_VOL_TREND.value
+    assert full_panel["macro_regime"][-1] == MacroRegime.BEAR_HIGH_VOL_SHOCK.value
+    no_vix_panel = classify_macro_regime_panel(idx_df.head(260), None, breadth_by_date=breadth)
+    assert no_vix_panel["macro_regime"][259] == MacroRegime.LOW_VOL_TREND.value
+
+    # Point-in-time causality: prefix classification at session 259 matches full panel at session 259
+    pref = classify_macro_regime_panel(idx_df.head(260), vix_df.head(260), breadth_by_date=breadth)
+    assert pref["macro_regime"][-1] == full_panel["macro_regime"][259]
+
+    # Empirical trial DSR (unannualized daily returns & Pearson kurtosis fisher=False)
+    daily_rets = [0.0020 if i % 3 != 0 else -0.0008 for i in range(1250)]
+    dsr_emp, sr0 = compute_empirical_trial_dsr(daily_rets, [0.07, 0.05, 0.06, 0.02, 0.04])
+    assert 0.95 <= dsr_emp <= 1.0
+    assert 0.0 <= sr0 < 0.05
+    assert math.isclose(compute_multivariant_bonus(1.0, 0.40, 0.04, 1.2), 0.25 + 0.08 + 0.10 + 0.04, rel_tol=1e-9)

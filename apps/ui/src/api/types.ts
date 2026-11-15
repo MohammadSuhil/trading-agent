@@ -368,7 +368,13 @@ export type IndustryRow = {
   notional?: N;
   pct_equity?: N;
   n_names?: N;
+  max_names?: N;
   cap_pct?: N;
+  heat_rupees?: N;
+  heat_pct?: N;
+  heat_cap_pct?: N;
+  headroom_rupees?: N;
+  headroom_frac?: N;
   headroom?: N;
 };
 

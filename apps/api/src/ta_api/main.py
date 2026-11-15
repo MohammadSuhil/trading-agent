@@ -42,7 +42,7 @@ from ta_core.asof import AsOf
 from ta_core.enums import Regime
 from ta_core.glossary import as_dict
 from ta_datafeed.store import GuardedClient
-from ta_ledger.risk import DEFAULT, Portfolio, rule_states
+from ta_ledger.risk import DEFAULT, TIERED_DEFAULT, Portfolio, rule_states
 
 log = logging.getLogger(__name__)
 
@@ -578,7 +578,7 @@ def portfolio() -> dict:
         return {
             "equity": pf.equity, "cash": pf.cash, "deployed": pf.deployed,
             "n_positions": len(pf.positions),
-            "heat_pct": pf.heat_pct, "drawdown_pct": pf.drawdown_pct,
+            "heat_pct": pf.principal_heat_pct, "drawdown_pct": pf.drawdown_pct,
             "watermark": max(pf.watermark, pf.equity),
             "positions": [
                 {"symbol": p.symbol, "industry": p.industry, "qty": p.qty,
@@ -1160,21 +1160,25 @@ def industries() -> dict:
         rows = []
         for ind in names:
             cap = (cfg.finserv_max_pct if ind == cfg.finserv_industry
-                   else cfg.max_industry_pct)
+                   else TIERED_DEFAULT.max_industry_pct)
             notional = pf.industry_notional(ind)
+            ind_heat = pf.industry_heat(ind)
+            ind_heat_pct = ind_heat / pf.equity if pf.equity else 0.0
             headroom_rupees = pf.equity * cap - notional
+            headroom_frac = (headroom_rupees / (pf.equity * cap)
+                             if pf.equity and cap else None)
             rows.append({
                 "industry": ind, "notional": notional,
                 "pct_equity": notional / pf.equity if pf.equity else 0.0,
-                "n_names": pf.industry_names(ind), "cap_pct": cap,
-                # Both, explicitly named. `headroom` alone was ambiguous: the
-                # dashboard could not tell rupees from a fraction and had to
-                # guess from magnitude, which silently stops working the day
-                # a fraction happens to exceed 1.0.
+                "n_names": pf.industry_names(ind),
+                "max_names": TIERED_DEFAULT.max_industry_names,
+                "cap_pct": cap,
+                "heat_rupees": ind_heat,
+                "heat_pct": ind_heat_pct,
+                "heat_cap_pct": TIERED_DEFAULT.max_industry_heat_pct,
                 "headroom_rupees": headroom_rupees,
-                "headroom_frac": (headroom_rupees / (pf.equity * cap)
-                                  if pf.equity and cap else None),
-                "headroom": headroom_rupees,   # deprecated alias
+                "headroom_frac": headroom_frac,
+                "headroom": headroom_frac,
             })
         return {"as_of": d.isoformat() if d else None, "rows": rows}
 

@@ -19,6 +19,11 @@
   "stop_atr": 3.0,
   "target_atr": 10.0,
   "min_expectancy_atr": 0.05,
+  "tiered_max_positions": 12,
+  "tiered_max_per_industry": 3,
+  "tiered_max_portfolio_heat_pct": 0.0685,
+  "bear_shock_winner_trail_pct": 0.09,
+  "v24_max_sessions": 42,
   "composite_weights": {
     "sortino_mom_12_1": 0.45,
     "sortino_mom_6m": 0.35,

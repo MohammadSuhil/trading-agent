@@ -513,6 +513,8 @@ def run_backtest(
     entry_block: EntryBlock | None = None,
     strategy_version: str = "v1",
     use_pit_liquidity: bool = False,
+    index_bars: pl.DataFrame | None = None,
+    vix_bars: pl.DataFrame | None = None,
 ) -> BacktestResult:
     """Execute historical backtest over daily bars without lookahead bias.
 
@@ -526,9 +528,10 @@ def run_backtest(
             start_date=start_date, end_date=end_date,
             initial_equity=initial_equity, arm=arm,
             tradeable_index=tradeable_index, scored_index=scored_index,
-            cfg=cfg, weights=None, n_trials=max(n_trials, 36),
+            cfg=cfg, weights=None, n_trials=n_trials,
             warmup_sessions=warmup_sessions, index_regime=index_regime,
             entry_block=entry_block, use_pit_liquidity=use_pit_liquidity,
+            index_bars=index_bars, vix_bars=vix_bars,
         )
 
     all_sessions = sorted(bars["d"].unique().to_list())

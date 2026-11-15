@@ -130,6 +130,11 @@ class ChallengerWeights:
     min_expectancy_atr: float
     composite_weights: dict
     sha256: str
+    tiered_max_positions: int = 12
+    tiered_max_per_industry: int = 3
+    tiered_max_portfolio_heat_pct: float = 0.0685
+    bear_shock_winner_trail_pct: float = 0.09
+    v24_max_sessions: int = 42
 
 
 def load_challenger_weights(
@@ -167,5 +172,10 @@ def load_challenger_weights(
         min_expectancy_atr=float(data["min_expectancy_atr"]),
         composite_weights=dict(data["composite_weights"]),
         sha256=digest,
+        tiered_max_positions=int(data.get("tiered_max_positions", 12)),
+        tiered_max_per_industry=int(data.get("tiered_max_per_industry", 3)),
+        tiered_max_portfolio_heat_pct=float(data.get("tiered_max_portfolio_heat_pct", 0.0685)),
+        bear_shock_winner_trail_pct=float(data.get("bear_shock_winner_trail_pct", 0.09)),
+        v24_max_sessions=int(data.get("v24_max_sessions", 42)),
     )
 

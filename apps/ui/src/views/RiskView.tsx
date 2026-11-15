@@ -166,7 +166,11 @@ const INDUSTRY_COLUMNS: Column<IndustryRow>[] = [
     align: 'right',
     sortable: true,
     value: (r) => r.n_names,
-    render: (r) => count(r.n_names),
+    render: (r) => (
+      <span className="tnum">
+        {count(r.n_names)} <span className="text-xs text-muted">/ {count(r.max_names ?? 3)}</span>
+      </span>
+    ),
   },
   {
     key: 'pct_equity',
@@ -176,6 +180,19 @@ const INDUSTRY_COLUMNS: Column<IndustryRow>[] = [
     value: (r) => r.pct_equity,
     render: (r) => pctFrac(r.pct_equity),
     term: 'equity',
+  },
+  {
+    key: 'heat_pct',
+    header: 'Open risk / cap',
+    align: 'right',
+    sortable: true,
+    value: (r) => r.heat_pct,
+    term: 'TIER-03',
+    render: (r) => (
+      <span className="tnum">
+        {pctFrac(r.heat_pct)} <span className="text-xs text-muted">/ {pctFrac(r.heat_cap_pct ?? 0.03)}</span>
+      </span>
+    ),
   },
   {
     key: 'cap_pct',
@@ -190,17 +207,11 @@ const INDUSTRY_COLUMNS: Column<IndustryRow>[] = [
     key: 'headroom',
     header: 'Headroom to cap',
     sortable: true,
-    value: (r) => r.headroom,
+    value: (r) => r.headroom_frac ?? r.headroom,
     className: 'w-56',
     term: 'headroom',
     render: (r) => {
-      // `headroom` is the one field here with no unit in the contract AND no
-      // live example to check against (/api/industries returns [] today). Every
-      // sibling field in this API is a fraction, so it is drawn as one — but
-      // only when it actually lies in 0..1. Outside that range the bar is left
-      // empty and the raw number printed, because a meter on a scale we are
-      // guessing at is worse than no meter.
-      const h = r.headroom;
+      const h = r.headroom_frac ?? r.headroom;
       const meterable = isNum(h) && h >= 0 && h <= 1;
       return (
         <div className="flex items-center gap-2">
