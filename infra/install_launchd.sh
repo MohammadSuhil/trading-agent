@@ -39,11 +39,25 @@ install)
     [ -f "$src" ] || { echo "  skip   $a (no plist)"; continue; }
     plutil -lint "$src" >/dev/null || { echo "  FAIL   $a: malformed plist"; continue; }
     cp "$src" "$DEST/$a.plist"
+    # bootout returns BEFORE the old instance has stopped (ClickHouse takes
+    # seconds to shut down), and bootstrapping while the label is still
+    # registered fails -- on 2026-11-11 that left three services unloaded.
+    # Wait until launchd has really forgotten it, retry a few times, and keep
+    # bootstrap's error message instead of discarding it.
     launchctl bootout "gui/$UID_N/$a" 2>/dev/null
-    if launchctl bootstrap "gui/$UID_N" "$DEST/$a.plist" 2>/dev/null; then
+    for _ in {1..30}; do
+      launchctl print "gui/$UID_N/$a" >/dev/null 2>&1 || break
+      sleep 1
+    done
+    ok=0; err=""
+    for _ in 1 2 3; do
+      if err=$(launchctl bootstrap "gui/$UID_N" "$DEST/$a.plist" 2>&1); then ok=1; break; fi
+      sleep 2
+    done
+    if [ "$ok" = 1 ]; then
       echo "  ok     $a"
     else
-      echo "  FAIL   $a (see: launchctl print gui/$UID_N/$a)"
+      echo "  FAIL   $a: ${err:-unknown error} (see: launchctl print gui/$UID_N/$a)"
     fi
   done
   echo

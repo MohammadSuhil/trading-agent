@@ -11,10 +11,20 @@ Signatures: [docs/CODEMAP.md](../../docs/CODEMAP.md) § packages/quant.
 | `nightly.py` | `execute_nightly`, `load_panel_inputs`, `persist`, `as_of_for` | All DB I/O for the run. Dedupes bars on `(symbol, d)`. `LOOKBACK_SESSIONS = 420`. `current_portfolio()` is empty until the M2 ledger exists |
 | `factors/price.py` | `add_price_factors` | ~20 factors (target ~70). Polars `over("symbol")`, strictly trailing windows — a centred window would leak |
 | `trend.py` | `add_trend_states`, `nw_lag` | Drift = HAC (Newey-West) t-stat of mean log return, not OLS slope |
-| `barriers.py` | `build_path_library`, `estimate_barriers`, `BarrierEstimate` | Empirical, one Dirichlet over target/stop/time; pessimistic same-bar → DOWN; refuses when thin |
+| `regime.py` | `regime_series`, `regime_on`, `classify`, `apply_hysteresis` | Index rules on **Nifty 500** (ADR-0004): BEAR / HIGH_VOL / BULL / SIDEWAYS → TREND_DOWN / HIGH_VOL / TREND_UP / CHOP; RISK-26 hysteresis (tighten now, loosen after 3). **Live entry block** (ADR-0006): `EntryBlock` vetoes new buys while the index regime is bear/sideways; `nightly.LIVE_ENTRY_BLOCK`. Caps still follow `pipeline.infer_regime` (breadth). Frozen control never blocked |
+| `barriers.py` | `build_path_library`, `estimate_barriers`, `BarrierModel`, `BarrierEstimate`, `known_paths` | `known_paths` = the one PIT cut (`exit_d <= d`, last 252 exit sessions) shared by live and backtest (ADR-0003). **Build one `BarrierModel` per session** and call `.estimate(atr_pct)` per candidate — per-candidate `estimate_barriers` was 92% of backtest time; a test caps cells computed per session |
+| `barriers.py` (cont.) | `build_path_library`, `estimate_barriers`, `BarrierEstimate` | Empirical, one Dirichlet over target/stop/time; pessimistic same-bar → DOWN; refuses when thin |
 
-**Reads:** `md.bars_1d`, `md.index_members`, `ev.positions` (open book). **Writes:** `md.sector_daily`,
-`md.trend_1d`, `md.breadth_daily`, `ev.recommendations`, `ev.rejections`.
+**Reads:** `md.bars_1d`, `md.index_members`, `md.index_1d` (Nifty 500 OHLC, via `query_pit`), `ev.positions`
+(open book). **Writes:** `md.sector_daily`, `md.trend_1d`, `md.breadth_daily`, `ev.recommendations`,
+`ev.rejections`, `md.regime_daily` (nightly, non-replay: the informational index regime), `ev.backtest_runs`
+(every control or regime-filter backtest, one row per line, keyed by window — stats + simulation + curve,
+I-29), `ev.equity_daily` / `ev.outcomes` (latest FROZEN_CONTROL backtest only — regime-filter and
+DETERMINISTIC backtests never write them, I-28). `ev.simulation` / `ev.backtest_variants` are deprecated.
+
+**Replay caveat:** `md.index_members` holds dated snapshots from 2026-10-31 on, so a PIT replay of an
+earlier session sees no membership and yields no cards. Backtests use the current snapshot for all
+dates instead (survivorship — see M3 known traps).
 
 **Empty placeholders:** `backtest/` (M3), `ml/` (M10), `screener/`.
 

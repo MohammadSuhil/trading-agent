@@ -145,3 +145,94 @@ def test_pit_bound_prevents_lookahead_leakage():
     as_of_at = AsOf(ex_kt)
     bars_at = apply_adjustments(bars, actions, as_of=as_of_at)
     assert abs(bars_at["close"][0] - 500.0) < 1e-6
+
+
+def test_infer_unadjusted_prev_close_1_to_5_split():
+    """Case 2: prev_close unadjusted on 1:5 split (CANBK-like scenario).
+    
+    prior_close=566.55, prev_close=566.55, open=116.25, close=119.0
+    Detects SPLIT 1:5, adj_factor=0.2.
+    """
+    bars = pl.DataFrame({
+        "symbol": ["CANBK", "CANBK"],
+        "d": [date(2026, 3, 1), date(2026, 3, 2)],
+        "open": [560.0, 116.25],
+        "high": [570.0, 120.0],
+        "low": [555.0, 115.0],
+        "close": [566.55, 119.0],
+        "prev_close": [560.0, 566.55],  # prev_close unadjusted on split ex-date
+        "volume": [1_000_000, 5_000_000],
+        "turnover": [564_000_000.0, 597_187_500.0],
+        "knowledge_time": [
+            datetime(2026, 3, 1, 18, 0, tzinfo=UTC),
+            datetime(2026, 3, 2, 18, 0, tzinfo=UTC),
+        ],
+    })
+    ca = infer_corporate_actions(bars)
+    assert ca.height == 1
+    row = ca.row(0, named=True)
+    assert row["symbol"] == "CANBK"
+    assert row["ex_date"] == date(2026, 3, 2)
+    assert row["action_type"] == "SPLIT"
+    assert row["ratio_from"] == 1.0
+    assert row["ratio_to"] == 5.0
+    assert abs(row["adj_factor"] - 0.2) < 1e-6
+
+
+def test_infer_unadjusted_prev_close_1_to_2_bonus():
+    """Case 2: prev_close unadjusted on 2:3 (1:2 bonus) ex-date (CAMS-like scenario).
+    
+    prior_close=900.0, prev_close=900.0, open=602.0, close=608.0
+    calm turnover, detects BONUS 2:3, adj_factor=2/3.
+    """
+    bars = pl.DataFrame({
+        "symbol": ["CAMS", "CAMS"],
+        "d": [date(2026, 4, 1), date(2026, 4, 2)],
+        "open": [900.0, 602.0],
+        "high": [910.0, 610.0],
+        "low": [890.0, 598.0],
+        "close": [900.0, 608.0],
+        "prev_close": [895.0, 900.0],  # prev_close unadjusted on bonus ex-date
+        "volume": [500_000, 750_000],
+        "turnover": [450_000_000.0, 456_000_000.0],
+        "knowledge_time": [
+            datetime(2026, 4, 1, 18, 0, tzinfo=UTC),
+            datetime(2026, 4, 2, 18, 0, tzinfo=UTC),
+        ],
+    })
+    ca = infer_corporate_actions(bars)
+    assert ca.height == 1
+    row = ca.row(0, named=True)
+    assert row["symbol"] == "CAMS"
+    assert row["ex_date"] == date(2026, 4, 2)
+    assert row["action_type"] == "BONUS"
+    assert row["ratio_from"] == 2.0
+    assert row["ratio_to"] == 3.0
+    assert abs(row["adj_factor"] - (2.0 / 3.0)) < 1e-6
+
+
+def test_panic_crash_with_volume_spike_is_not_misclassified_as_bonus():
+    """Case 2 guard: panic crash (-33%) with 10x turnover spike.
+    
+    prior_close=900, prev_close=900, open=600, close=590 (unadjusted),
+    _t_mult=10.0 prevents false 1:1.5 bonus trigger.
+    Returns 0 corporate actions.
+    """
+    bars = pl.DataFrame({
+        "symbol": ["PANIC", "PANIC"],
+        "d": [date(2026, 5, 1), date(2026, 5, 2)],
+        "open": [900.0, 600.0],
+        "high": [910.0, 610.0],
+        "low": [890.0, 580.0],
+        "close": [900.0, 590.0],
+        "prev_close": [895.0, 900.0],  # Overnight holds at 900, intraday crashes
+        "volume": [500_000, 5_000_000],  # 10x spike
+        "turnover": [450_000_000.0, 3_540_000_000.0],  # 10x spike (avg was ~350M)
+        "knowledge_time": [
+            datetime(2026, 5, 1, 18, 0, tzinfo=UTC),
+            datetime(2026, 5, 2, 18, 0, tzinfo=UTC),
+        ],
+    })
+    ca = infer_corporate_actions(bars)
+    # Should not detect a bonus action; crash is not a corporate action
+    assert ca.height == 0

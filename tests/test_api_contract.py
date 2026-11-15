@@ -107,7 +107,9 @@ def test_risk_rules_expose_state_and_never_a_bare_unexplained_number():
 @needs_ch
 def test_calibration_and_simulation_refuse_rather_than_guess():
     cal = client.get("/api/calibration").json()
-    assert cal["state"] in {"OK", "INSUFFICIENT"}
+    # OK is unreachable until M8 builds a calibrator: a sample count is not calibration.
+    assert cal["state"] in {"INSUFFICIENT", "NOT_BUILT"}
+    assert cal["bins"] == [] and cal["resolution"] is None and cal["bss"] is None
     if cal["state"] == "INSUFFICIENT":
         assert cal["resolution"] is None and cal["bss"] is None
         assert str(cal["needed"]) in cal["note"]
@@ -117,6 +119,9 @@ def test_calibration_and_simulation_refuse_rather_than_guess():
     if sim["status"] == "INSUFFICIENT":
         assert sim["p_lo"] is None and sim["p_hi"] is None
         assert sim["note"]
+    else:  # OK only with real thresholds met and a real interval
+        assert sim["n_days"] >= sim["needed_days"] and sim["n_trades"] >= sim["needed_trades"]
+        assert sim["p_lo"] <= sim["p_hi"] and sim["histogram"]
 
 
 @needs_ch
@@ -152,7 +157,7 @@ def test_backtest_contract_and_glossary_coverage():
 
     if _ch_up():
         bt = client.get("/api/backtest").json()
-        assert bt["state"] in {"READY", "OK"}
+        assert bt["state"] in {"READY", "OK", "NOT_RUN"}
         assert bt["arm"] == "FROZEN_CONTROL"
         assert bt["weights_version"] == "v1"
         assert isinstance(bt["weights_verified"], bool)
@@ -168,3 +173,14 @@ def test_backtest_contract_and_glossary_coverage():
         assert isinstance(bt["equity_curve"], list)
         assert isinstance(bt["benchmark_curve"], list)
 
+
+
+@needs_ch
+def test_portfolio_equity_curve_is_only_the_live_paper_book():
+    """The Portfolio chart is "your money"; a backtest arm must never be spliced in.
+
+    A fallback to "all arms" when the live book had <2 nights once drew the
+    FROZEN_CONTROL backtest (-12.7%) and the live account as a single line.
+    """
+    curve = client.get("/api/portfolio").json()["equity_curve"]
+    assert {r.get("arm") for r in curve} <= {"DETERMINISTIC"}, {r.get("arm") for r in curve}

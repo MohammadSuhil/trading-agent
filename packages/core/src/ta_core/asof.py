@@ -41,7 +41,8 @@ __all__ = [
 PIT_TABLES: frozenset[str] = frozenset({
     "md.bars_1d", "md.bars_1m", "md.features_1d", "md.index_members",
     "md.corporate_actions", "md.surveillance", "md.sector_daily",
-    "md.trend_1d", "md.breadth_daily", "md.benchmark_1d",
+    "md.trend_1d", "md.breadth_daily", "md.benchmark_1d", "md.index_1d",
+    "md.regime_daily",
     # A past recommendation must be served exactly as it was recorded. Putting
     # it behind the PIT guard is what stops an endpoint from "helpfully"
     # recomputing a probability with data that arrived after the decision.

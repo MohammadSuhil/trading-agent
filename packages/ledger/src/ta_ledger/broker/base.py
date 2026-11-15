@@ -48,10 +48,11 @@ class Order:
     sleeve: Sleeve = Sleeve.MOMENTUM_BREAKOUT
     arm: Arm = Arm.DETERMINISTIC
     reasons: tuple[str, ...] = ()
+    max_sessions: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert order to a dictionary suitable for ledger serialization."""
-        return {
+        out: dict[str, Any] = {
             "order_id": self.order_id,
             "symbol": self.symbol,
             "industry": self.industry,
@@ -66,6 +67,9 @@ class Order:
             "arm": self.arm.value,
             "reasons": list(self.reasons),
         }
+        if self.max_sessions > 0:
+            out["max_sessions"] = self.max_sessions
+        return out
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Order:
@@ -86,6 +90,7 @@ class Order:
             sleeve=Sleeve(str(data.get("sleeve", Sleeve.MOMENTUM_BREAKOUT))),
             arm=Arm(str(data.get("arm", Arm.DETERMINISTIC))),
             reasons=tuple(str(r) for r in data.get("reasons", ())),
+            max_sessions=int(data.get("max_sessions", 0)),
         )
 
 
@@ -141,10 +146,12 @@ class OpenLot:
     reasons: tuple[str, ...] = ()
     min_low_seen: float = 0.0
     max_high_seen: float = 0.0
+    missing_bars: int = 0
+    max_sessions: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert lot to a dictionary suitable for ledger serialization."""
-        return {
+        out: dict[str, Any] = {
             "order_id": self.order_id,
             "symbol": self.symbol,
             "industry": self.industry,
@@ -163,7 +170,11 @@ class OpenLot:
             "reasons": list(self.reasons),
             "min_low_seen": self.min_low_seen,
             "max_high_seen": self.max_high_seen,
+            "missing_bars": self.missing_bars,
         }
+        if self.max_sessions > 0:
+            out["max_sessions"] = self.max_sessions
+        return out
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> OpenLot:
@@ -189,4 +200,6 @@ class OpenLot:
             reasons=tuple(str(r) for r in data.get("reasons", ())),
             min_low_seen=float(data.get("min_low_seen", 0.0)),
             max_high_seen=float(data.get("max_high_seen", 0.0)),
+            missing_bars=int(data.get("missing_bars", 0)),
+            max_sessions=int(data.get("max_sessions", 0)),
         )

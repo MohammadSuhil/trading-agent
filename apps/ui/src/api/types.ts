@@ -299,8 +299,53 @@ export type Backtest = {
   dsr?: N;
   min_trl?: N;
   note?: S;
+  max_drawdown?: N;
   equity_curve?: List<EquityPoint>;
   benchmark_curve?: List<BenchmarkPoint>;
+  comparison?: BacktestComparison | null;
+  /** Window (in sessions) this result belongs to. */
+  sessions?: N;
+  /** The stored run being shown; null when the window has never been run. */
+  run?: { run_id?: S; run_ts?: S; start_d?: S; end_d?: S } | null;
+  /** Every window that has a stored run, for the selector. */
+  windows?: List<BacktestWindow>;
+  /** ADR-0005: the index this run is judged against, over the run's own dates. */
+  benchmark?: {
+    index?: S;
+    series?: S;
+    return_pct?: N;
+    excess_return_pct?: N;
+    beats_benchmark?: boolean | null;
+  } | null;
+};
+
+export type BacktestWindow = {
+  sessions?: N;
+  last_run?: S;
+  start_d?: S;
+  end_d?: S;
+  total_return_pct?: N;
+};
+
+/** A report-only rule variant backtested over the control's window (ADR-0004). */
+export type BacktestComparison = {
+  variant?: S;
+  same_window?: boolean | null;
+  start_d?: S;
+  end_d?: S;
+  n_sessions?: N;
+  n_trades?: N;
+  final_equity?: N;
+  total_return_pct?: N;
+  sharpe?: N;
+  max_drawdown?: N;
+  win_rate?: N;
+  excess_return_pct?: N;
+  bench_return_pct?: N;
+  psr?: N;
+  dsr?: N;
+  min_trl?: N;
+  curve?: List<{ d?: S; equity?: N; regime?: S; index_regime?: S }>;
 };
 
 export type RuleState = 'OK' | 'WARN' | 'BREACH' | 'DISPLAY_ONLY';
@@ -345,8 +390,9 @@ export type Trend = {
 export type CalibrationBin = { p_stated?: N; p_realised?: N; n?: N };
 
 export type Calibration = {
-  state?: 'INSUFFICIENT' | 'OK' | string | null;
+  state?: 'INSUFFICIENT' | 'NOT_BUILT' | 'OK' | string | null;
   n_eff?: N;
+  n_raw?: N;
   needed?: N;
   bins?: List<CalibrationBin>;
   resolution?: N;

@@ -1,0 +1,27 @@
+{
+  "version": "v2",
+  "strategy_mode": "SORTINO_RANK_BUFFER",
+  "horizon": "POSITIONAL",
+  "rebalance_cadence": "MONTHLY",
+  "max_positions": 7,
+  "hold_rank_buffer": 25,
+  "pit_liquidity_top_n": 350,
+  "initial_stop_pct": 0.125,
+  "trail_activate_gain_pct": 0.08,
+  "trail_drawdown_pct": 0.18,
+  "target_multiple": 5.0,
+  "entry_band_pct": 0.03,
+  "sma_exit_window": 200,
+  "max_pair_corr": 0.60,
+  "min_mom_12_1": 0.05,
+  "min_ret_126d": 0.05,
+  "min_price": 50.0,
+  "stop_atr": 3.0,
+  "target_atr": 10.0,
+  "min_expectancy_atr": 0.05,
+  "composite_weights": {
+    "sortino_mom_12_1": 0.45,
+    "sortino_mom_6m": 0.35,
+    "dist_52w_high": 0.20
+  }
+}

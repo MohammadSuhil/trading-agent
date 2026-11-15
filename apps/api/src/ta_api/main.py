@@ -252,7 +252,7 @@ def context() -> dict:
         )
         row = _rows(br)
         b = row[0] if row else {}
-        regime, note = _regime_from_breadth(b)
+        regime, note = _live_regime(ch, a, d, b)
         return {
             "as_of": d.isoformat(),
             "regime": regime.value, "regime_note": note,
@@ -269,6 +269,33 @@ def context() -> dict:
             },
             "data_quality": "OK" if row else "PARTIAL",
         }
+
+
+def _live_regime(ch, a, d, breadth: dict) -> tuple[Regime, str]:
+    """The breadth regime (sets the caps) plus the index regime and whether it is
+    blocking new buys under the live entry block (ADR-0006), read from the
+    regime the nightly recorded (md.regime_daily) -- never re-derived here.
+    """
+    regime, note = _regime_from_breadth(breadth)
+    try:
+        r = _rows(ch.query_pit("md.regime_daily", a, where=f"d <= '{d}' AND model = 'INDEX_RULES_V1'",
+                               order_by="d DESC", limit=1))
+    except Exception:  # noqa: BLE001
+        r = []
+    if r:
+        from ta_core.enums import Regime as _R
+        from ta_quant.nightly import LIVE_ENTRY_BLOCK
+        idx = _R(r[0]["regime"])
+        blocked = LIVE_ENTRY_BLOCK is not None and LIVE_ENTRY_BLOCK.blocks(regime, idx)
+        note = (f"{note} · Nifty 500 index regime: {humanize_regime(r[0]['regime'])}"
+                + (" — new buys BLOCKED (ADR-0006: no new buys while the index is bear or sideways)"
+                   if blocked else " — new buys allowed"))
+    return regime, note
+
+
+def humanize_regime(v: str) -> str:
+    return {"TREND_UP": "bull", "TREND_DOWN": "bear", "CHOP": "sideways",
+            "HIGH_VOL": "high volatility"}.get(v, v.lower())
 
 
 def _regime_from_breadth(b: dict) -> tuple[Regime, str]:
@@ -489,30 +516,35 @@ def portfolio() -> dict:
         pf = _portfolio(ch)
         a = _now()
         try:
+            # The live paper book ONLY. There used to be a fallback to "every
+            # arm" when the live book had <2 nights, which spliced the
+            # FROZEN_CONTROL backtest onto the live account as one line -- a
+            # simulated -12.7% presented as your money. The UI has an honest
+            # "needs 2 sessions" empty state; the backtest lives on /api/backtest.
             eq_df = ch.query_df(
                 "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
                 "FROM ev.equity_daily WHERE arm = 'DETERMINISTIC' ORDER BY d ASC LIMIT 1000"
             )
-            if eq_df.height < 2:
-                eq_df = ch.query_df(
-                    "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
-                    "FROM ev.equity_daily ORDER BY d ASC LIMIT 1000"
-                )
             if not eq_df.is_empty():
                 eq_df = eq_df.unique(subset=["d"], keep="last").sort("d")
             equity_curve = _rows(eq_df)
         except Exception:  # noqa: BLE001
             equity_curve = []
 
-        try:
-            bm_df = ch.query_pit(
-                "md.benchmark_1d", a,
-                columns="d, index_id, series_kind, close, ret_1d, tri_source",
-                order_by="d ASC", limit=1000,
-            )
-            benchmark_curve = _rows(bm_df)
-        except Exception:  # noqa: BLE001
-            benchmark_curve = []
+        # ADR-0005 benchmark over the live book's own dates. md.benchmark_1d
+        # was never populated, so this chart never had a benchmark line.
+        benchmark_curve = []
+        if equity_curve:
+            try:
+                lo, hi = equity_curve[0]["d"], equity_curve[-1]["d"]
+                benchmark_curve = _rows(ch.query_pit(
+                    "md.index_1d", a, columns="d, index_name AS index_id, close, knowledge_time",
+                    where=f"index_name = 'Nifty 500' AND d >= '{lo}' AND d <= '{hi}'", order_by="d ASC",
+                ).sort("knowledge_time").unique(subset=["d"], keep="last").sort("d").drop("knowledge_time"))
+                for r in benchmark_curve:
+                    r["series_kind"], r["tri_source"] = "PRICE", "PUBLISHED_PRICE"
+            except Exception:  # noqa: BLE001
+                benchmark_curve = []
 
         try:
             import json
@@ -742,7 +774,7 @@ def paper_close(body: dict) -> dict:
 
         from ta_core.costs import compute_costs
         from ta_core.enums import ProductType
-        costs = compute_costs(pos_entry * pos_qty, exit_price * pos_qty, ProductType.DELIVERY).total()
+        costs = compute_costs(pos_entry * pos_qty, exit_price * pos_qty, ProductType.DELIVERY).total
         pnl_rupees = round((exit_price - pos_entry) * pos_qty - costs, 2)
 
         pos_close_df = pl.DataFrame([{
@@ -892,127 +924,200 @@ def paper_close(body: dict) -> dict:
 
 
 # ------------------------------------------------------------------- backtest
+def _iso(ts) -> str:
+    """A run timestamp as ISO-8601 UTC ("2026-11-11T17:43:26.897Z"), whatever the driver returns."""
+    from datetime import datetime as _dt
+
+    if isinstance(ts, str):
+        try:
+            ts = _dt.fromisoformat(ts.replace(" ", "T"))
+        except ValueError:
+            return ts
+    if isinstance(ts, _dt):
+        ts = ts.astimezone(UTC) if ts.tzinfo else ts.replace(tzinfo=UTC)
+        return ts.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return str(ts)
+
+
+_RUN_COLS = (
+    "run_id, run_ts, line, sessions, start_d, end_d, n_sessions, n_trades, initial_equity, "
+    "final_equity, total_return, sharpe, psr, dsr, min_trl, win_rate, max_drawdown, "
+    "bench_index, bench_return, excess_return, "
+    "sim_status, sim_horizon, sim_block_len, sim_n_paths, sim_p_lo, sim_p_hi, sim_p_loss, "
+    "sim_hist_lo, sim_hist_count, curve_d, curve_equity, curve_drawdown, curve_heat, curve_regime, "
+    "curve_index_regime"
+)
+
+
+def _latest_backtest_run(ch, line: str, sessions: int | None, run_id: str | None = None) -> dict | None:
+    """Latest stored run of `line` for a window (or exactly `run_id`)."""
+    where = [f"line = '{line}'"]
+    if run_id is not None:
+        where.append(f"run_id = '{run_id}'")
+    elif sessions is not None:
+        where.append(f"sessions = {int(sessions)}")
+    df = ch.query_df(f"SELECT {_RUN_COLS} FROM ev.backtest_runs WHERE {' AND '.join(where)} "
+                     "ORDER BY run_ts DESC LIMIT 1")
+    return None if df.is_empty() else df.row(0, named=True)
+
+
+def _stored_windows(ch) -> list[dict]:
+    """Every window with a stored control run, and when it was last run."""
+    df = ch.query_df(
+        "SELECT sessions, max(run_ts) AS last_run, argMax(start_d, run_ts) AS start_d, "
+        "argMax(end_d, run_ts) AS end_d, argMax(total_return, run_ts) AS total_return "
+        "FROM ev.backtest_runs WHERE line = 'FROZEN_CONTROL' GROUP BY sessions ORDER BY sessions"
+    )
+    return [{"sessions": int(r["sessions"]), "last_run": _iso(r["last_run"]), "start_d": str(r["start_d"]),
+             "end_d": str(r["end_d"]), "total_return_pct": float(r["total_return"])} for r in _rows(df)]
+
+
 @app.get("/api/backtest")
-def backtest() -> dict:
+def backtest(sessions: int | None = None) -> dict:
+    """The stored backtest for one window -- the last run of THAT window.
+
+    Each window (63 / 126 / 252 / 750 / 1250 sessions, or any CLI value) keeps
+    its own latest run in ev.backtest_runs, so switching the selector shows the
+    last result for that window until it is re-run. With no `sessions`, the most
+    recent run of any window. Statistics are the job's own, stored with the run.
+    """
     a = _now()
+    weights_verified, weights_sha256 = False, ""
+    try:
+        from ta_quant.weights import EXPECTED_V1_SHA256, verify_v1_integrity
+        weights_verified = bool(verify_v1_integrity())
+        weights_sha256 = str(EXPECTED_V1_SHA256)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from ta_ledger.events import verify_chain
+        verify_chain([])
+        ledger_verified = True
+    except Exception:  # noqa: BLE001
+        ledger_verified = False
+
+    base = {
+        "arm": "FROZEN_CONTROL", "weights_version": "v1", "weights_verified": weights_verified,
+        "weights_sha256": weights_sha256, "ledger_verified": ledger_verified, "needed_sessions": 63,
+    }
     with _ch() as ch:
         try:
-            eq_df = ch.query_df(
-                "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
-                "FROM ev.equity_daily WHERE arm = 'FROZEN_CONTROL' ORDER BY d ASC LIMIT 1000"
-            )
-            if eq_df.is_empty():
-                eq_df = ch.query_df(
-                    "SELECT d, arm, equity, cash, deployed, heat_pct, drawdown AS drawdown_pct "
-                    "FROM ev.equity_daily ORDER BY d ASC LIMIT 1000"
-                )
-            if not eq_df.is_empty():
-                eq_df = eq_df.unique(subset=["d"], keep="last").sort("d")
-            eq_rows = _rows(eq_df)
+            windows = _stored_windows(ch)
+            run = _latest_backtest_run(ch, "FROZEN_CONTROL", sessions)
         except Exception:  # noqa: BLE001
-            eq_rows = []
+            windows, run = [], None
+        if run is None:
+            return {
+                **base, "state": "NOT_RUN", "stats_state": "INSUFFICIENT", "sessions": sessions,
+                "windows": windows, "n_sessions": 0, "n_trades": 0, "final_equity": None,
+                "total_return_pct": None, "sharpe": None, "win_rate": None, "psr": None, "dsr": None,
+                "min_trl": None, "max_drawdown": None, "equity_curve": [], "benchmark_curve": [],
+                "comparison": None, "run": None,
+                "note": (f"No backtest has been stored for the {sessions}-session window yet. "
+                         "Click 'Run historical backtest' to create one." if sessions else
+                         "No backtest has been run yet."),
+            }
 
+        # regime = breadth (it set the caps); index_regime = information only.
+        # Runs stored before the index column existed have it empty.
+        idx_reg = run["curve_index_regime"] or [None] * len(run["curve_d"])
+        curve = [
+            {"d": str(d_), "arm": "FROZEN_CONTROL", "equity": e_, "drawdown_pct": dd_, "heat_pct": h_,
+             "regime": g_, "index_regime": ig_}
+            for d_, e_, dd_, h_, g_, ig_ in zip(run["curve_d"], run["curve_equity"], run["curve_drawdown"],
+                                                run["curve_heat"], run["curve_regime"], idx_reg, strict=True)
+        ]
+        lo, hi = run["start_d"], run["end_d"]
+        bm_rows: list[dict] = []
         try:
-            bm_df = ch.query_pit(
-                "md.benchmark_1d", a,
-                columns="d, index_id, series_kind, close, ret_1d, tri_source",
-                order_by="d ASC", limit=1000,
-            )
-            bm_rows = _rows(bm_df)
+            # The published Nifty 500 PRICE index (the free daily file has no
+            # TRI) over exactly this run's dates. ReplacingMergeTree keeps
+            # re-ingested days twice until a merge: dedupe on read.
+            bm_rows = _rows(ch.query_pit(
+                "md.index_1d", a, columns="d, index_name AS index_id, close, knowledge_time",
+                where=f"index_name = 'Nifty 500' AND d >= '{lo}' AND d <= '{hi}'", order_by="d ASC",
+            ).sort("knowledge_time").unique(subset=["d"], keep="last").sort("d").drop("knowledge_time"))
+            for r in bm_rows:
+                r["series_kind"], r["tri_source"] = "PRICE", "PUBLISHED_PRICE"
         except Exception:  # noqa: BLE001
             bm_rows = []
 
+        cmp = None
         try:
-            from ta_quant.weights import EXPECTED_V1_SHA256, verify_v1_integrity
-            weights_verified = bool(verify_v1_integrity())
-            weights_sha256 = str(EXPECTED_V1_SHA256)
+            # The variant from the SAME request if there is one, else the latest
+            # for this window; drawn only if it covers exactly the same dates.
+            v = _latest_backtest_run(ch, "REGIME_FILTER", None, run_id=run["run_id"]) or \
+                _latest_backtest_run(ch, "REGIME_FILTER", int(run["sessions"]))
+            if v is not None:
+                same = str(v["start_d"]) == str(lo) and str(v["end_d"]) == str(hi)
+                cmp = {
+                    "variant": "REGIME_FILTER", "same_window": same, "run_ts": _iso(v["run_ts"]),
+                    "start_d": str(v["start_d"]), "end_d": str(v["end_d"]),
+                    "n_sessions": v["n_sessions"], "n_trades": v["n_trades"],
+                    "final_equity": v["final_equity"], "total_return_pct": v["total_return"],
+                    "sharpe": v["sharpe"], "max_drawdown": v["max_drawdown"], "win_rate": v["win_rate"],
+                    "excess_return_pct": v["excess_return"], "bench_return_pct": v["bench_return"],
+                    "psr": v["psr"] if int(v["n_sessions"]) >= 63 else None,
+                    "dsr": v["dsr"] if int(v["n_sessions"]) >= 63 else None,
+                    "min_trl": v["min_trl"] if int(v["n_sessions"]) >= 63 else None,
+                    "curve": [{"d": str(d_), "equity": e_, "regime": g_, "index_regime": ig_} for d_, e_, g_, ig_ in
+                              zip(v["curve_d"], v["curve_equity"], v["curve_regime"],
+                                  v["curve_index_regime"] or [None] * len(v["curve_d"]), strict=True)] if same else [],
+                }
         except Exception:  # noqa: BLE001
-            weights_verified = False
-            weights_sha256 = ""
+            cmp = None
 
-        try:
-            from ta_ledger.events import verify_chain
-            verify_chain([])
-            ledger_verified = True
-        except Exception:  # noqa: BLE001
-            ledger_verified = False
-
-        n_sessions = len(eq_rows)
-        needed_sessions = 63
-        final_equity = float(eq_rows[-1]["equity"]) if eq_rows else 500_000.0
-        init_equity = float(eq_rows[0]["equity"]) if eq_rows else 500_000.0
-        total_return_pct = round((final_equity - init_equity) / init_equity, 6) if init_equity > 0 else 0.0
-
-        outcomes_list = []
-        try:
-            out_df = ch.query_df(
-                "SELECT symbol, pnl_rupees, holding_days FROM ev.outcomes "
-                "WHERE arm = 'FROZEN_CONTROL' AND knowledge_time <= '2099-01-01 00:00:00'"
-            )
-            outcomes_list = _rows(out_df)
-        except Exception:  # noqa: BLE001
-            outcomes_list = []
-
-        if n_sessions >= 63:
-            stats_state = "OK"
-            try:
-                from ta_quant.stats import compute_backtest_stats, min_trl
-                b_stats = compute_backtest_stats(eq_rows, outcomes=outcomes_list)
-                psr_val: float | None = float(b_stats.psr)
-                dsr_val: float | None = float(b_stats.dsr)
-                m_trl = min_trl(b_stats.sharpe_annualised) if b_stats.sharpe_annualised > 0 else None
-                min_trl_val: float | None = (
-                    float(round(m_trl, 1)) if m_trl is not None and m_trl != float("inf") else None
-                )
-                sharpe_val = float(b_stats.sharpe_annualised)
-                n_trades_val = int(b_stats.n_trades)
-                win_rate_val = float(b_stats.hit_rate)
-                note_val = "Deflated performance statistics computed from historical backtest sessions."
-            except Exception as e:  # noqa: BLE001
-                psr_val, dsr_val, min_trl_val = None, None, None
-                sharpe_val, n_trades_val, win_rate_val = 0.0, 0, 0.0
-                note_val = f"Failed to compute statistics: {e}"
-        else:
-            stats_state = "INSUFFICIENT"
-            psr_val = None
-            dsr_val = None
-            min_trl_val = None
-            sharpe_val = 0.0
-            n_trades_val = 0
-            win_rate_val = 0.0
-            note_val = f"Deflated performance statistics need at least 63 trading sessions; {n_sessions} recorded so far."
-
-        return {
-            "state": "READY",
-            "arm": "FROZEN_CONTROL",
-            "weights_version": "v1",
-            "weights_verified": weights_verified,
-            "weights_sha256": weights_sha256,
-            "ledger_verified": ledger_verified,
-            "stats_state": stats_state,
-            "n_sessions": n_sessions,
-            "needed_sessions": needed_sessions,
-            "final_equity": final_equity,
-            "total_return_pct": total_return_pct,
-            "sharpe": sharpe_val,
-            "n_trades": n_trades_val,
-            "win_rate": win_rate_val,
-            "psr": psr_val,
-            "dsr": dsr_val,
-            "min_trl": min_trl_val,
-            "note": note_val,
-            "equity_curve": eq_rows,
-            "benchmark_curve": bm_rows,
-        }
+    n = int(run["n_sessions"])
+    enough = n >= base["needed_sessions"]
+    return {
+        **base, "state": "READY", "sessions": int(run["sessions"]), "windows": windows,
+        "run": {"run_id": run["run_id"], "run_ts": _iso(run["run_ts"]), "start_d": str(lo), "end_d": str(hi)},
+        "stats_state": "OK" if enough else "INSUFFICIENT",
+        "n_sessions": n, "n_trades": int(run["n_trades"]), "final_equity": float(run["final_equity"]),
+        "total_return_pct": float(run["total_return"]), "sharpe": float(run["sharpe"]),
+        "win_rate": float(run["win_rate"]), "max_drawdown": float(run["max_drawdown"]),
+        # ADR-0005: the index every strategy must beat, over THIS run's dates.
+        "benchmark": {
+            "index": run["bench_index"] or "Nifty 500", "series": "PRICE (dividends excluded)",
+            "return_pct": run["bench_return"], "excess_return_pct": run["excess_return"],
+            "beats_benchmark": (None if run["excess_return"] is None else bool(run["excess_return"] > 0)),
+        },
+        "psr": run["psr"] if enough else None, "dsr": run["dsr"] if enough else None,
+        "min_trl": run["min_trl"] if enough else None,
+        "note": ("Deflated statistics computed by the backtest job and stored with this run."
+                 if enough else f"Deflated statistics need at least 63 sessions; this run has {n}."),
+        "equity_curve": curve, "benchmark_curve": bm_rows, "comparison": cmp,
+    }
 
 
 @app.post("/api/backtest/run")
 def run_backtest_api(body: dict | None = None) -> dict:
-    """Trigger a historical backtest execution and persist results."""
+    """Run the control backtest for one window and, unless `compare` is false,
+    the ADR-0004 regime-filter variant over the SAME window. Both are stored in
+    ev.backtest_runs under that window with one shared run_id, replacing only
+    that window's previous result. Returns the window's stored result."""
+    import uuid
+
     from ta_quant.nightly import execute_backtest
     sessions = int((body or {}).get("sessions") or 126)
-    execute_backtest(sessions=sessions, persist_results=True)
-    return backtest()
+    run_id = f"BT-{uuid.uuid4().hex[:12]}"
+    if not (body or {}).get("compare", True):
+        execute_backtest(sessions=sessions, persist_results=True, run_id=run_id)
+        return backtest(sessions)
+    # The two runs are independent and write DIFFERENT rows (line =
+    # FROZEN_CONTROL / REGIME_FILTER; only the control touches ev.equity_daily,
+    # I-28), so they run side by side in two processes. Processes, not threads:
+    # the session loop is Python-bound and would serialise on the GIL. Sessions
+    # WITHIN a run cannot be parallelised -- each day depends on the prior book.
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(max_workers=2, mp_context=mp.get_context("spawn")) as pool:
+        control = pool.submit(execute_backtest, sessions, persist_results=True, run_id=run_id)
+        variant = pool.submit(execute_backtest, sessions, regime_filter=True, run_id=run_id)
+        control.result()
+        variant.result()
+    return backtest(sessions)
 
 
 # ----------------------------------------------------------------------- risk
@@ -1028,7 +1133,7 @@ def risk() -> dict:
                 "md.breadth_daily", _now(),
                 where=f"d = '{d}' AND universe = 'NIFTY500'", limit=1,
             ))
-            regime, _ = _regime_from_breadth(b[0] if b else {})
+            regime, _ = _live_regime(ch, _now(), d, b[0] if b else {})
         except Exception:  # noqa: BLE001
             regime = Regime.UNKNOWN
         return {
@@ -1106,44 +1211,106 @@ def trend(symbol: str) -> dict:
 
 
 # --------------------------------------------------- calibration & simulation
+#: Only outcomes of recommendations the system actually made count toward
+#: calibration. FROZEN_CONTROL rows are a backtest of a different rule set;
+#: counting them is how this endpoint once said "OK" with zero bins.
+_CALIBRATION_ARMS = ("DETERMINISTIC", "SHADOW_BUY", "SHADOW_WATCH")
+
+
 @app.get("/api/calibration")
 def calibration() -> dict:
-    """Honest by construction: nothing has resolved yet, so there is nothing
-    to calibrate, and the endpoint says so rather than drawing an empty chart
-    that implies calibration is known and perfect."""
+    """Never "OK" until a calibrator exists (M8) -- a sample count is not calibration.
+
+    It previously returned OK once ANY 30 rows sat in ev.outcomes (backtest
+    included) while sending no bins, BSS or resolution: a sufficiency badge
+    over nothing. Now:
+
+    * n_eff counts per-symbol EPISODES among live + shadow outcomes: windows
+      on the same name that overlap in time merge into one, because a WATCH
+      card repeated five days running is one path through one price move,
+      not five tests. (An earlier `uniqExact(symbol, exit_date)` still
+      counted those repeats whenever they resolved on different days.)
+    * Below 30 -> INSUFFICIENT. At or above 30 -> NOT_BUILT: enough evidence
+      exists, but the isotonic calibrator that would use it is M8 work.
+    """
+    arms = ", ".join(f"'{a}'" for a in _CALIBRATION_ARMS)
     with _ch() as ch:
         try:
-            n = ch.query_df("SELECT count() AS n FROM ev.outcomes")["n"][0]
+            row = ch.query_df(
+                "SELECT count() AS n_raw, countIf(new_episode) AS n_eff, "
+                "uniqExact(symbol) AS n_symbols, uniqExact(exit_date) AS n_exits FROM ("
+                "  SELECT symbol, exit_date, entry_date > max(exit_date) OVER ("
+                "    PARTITION BY symbol ORDER BY entry_date, exit_date "
+                "    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS new_episode"
+                f"  FROM ev.outcomes WHERE arm IN ({arms}) "
+                "  AND knowledge_time <= '2099-01-01 00:00:00')"
+            ).row(0, named=True)
+            n_raw, n_eff = int(row["n_raw"]), int(row["n_eff"])
+            n_symbols, n_exits = int(row["n_symbols"]), int(row["n_exits"])
         except Exception:  # noqa: BLE001
-            n = 0
+            n_raw = n_eff = n_symbols = n_exits = 0
+    needed = 30
+    if n_eff < needed:
+        state = "INSUFFICIENT"
+        note = (f"calibration needs at least {needed} independent resolved cards; have {n_eff} "
+                f"({n_raw} outcomes on {n_symbols} names over {n_exits} exit sessions, overlapping "
+                f"repeats merged). Until then the system cannot say how well its stated "
+                f"probabilities match reality.")
+    else:
+        state = "NOT_BUILT"
+        note = (f"{n_eff} independent resolved cards exist (threshold {needed}; {n_raw} outcomes "
+                f"on {n_symbols} names over only {n_exits} exit sessions, so they share market "
+                f"moves), but no calibrator is built yet: card probabilities are raw volatility-"
+                f"bucket base rates. Isotonic calibration arrives in M8; until then no "
+                f"calibration figure is claimed.")
     return {
-        "state": "OK" if n >= 30 else "INSUFFICIENT",
-        "n_eff": float(n), "needed": 30, "bins": [],
-        "resolution": None, "bss": None,
-        "note": ("calibration needs at least 30 resolved recommendations; "
-                 f"{n} have resolved so far. Until then the system cannot say "
-                 "how well its stated probabilities match reality."),
+        "state": state, "n_eff": float(n_eff), "n_raw": n_raw, "n_symbols": n_symbols,
+        "n_exit_sessions": n_exits, "needed": needed,
+        "bins": [], "resolution": None, "bss": None, "note": note,
     }
 
 
 @app.get("/api/simulation")
-def simulation() -> dict:
+def simulation(sessions: int | None = None) -> dict:
+    """The forward Monte Carlo of the stored backtest for one window.
+
+    Computed by the backtest job and stored with the run (ev.backtest_runs), so
+    it follows the window selector exactly like the backtest panel does: a
+    252-session window shows its own (refusing) verdict even after a 1250-
+    session run produced a full one.
+    """
+    from ta_quant.stats import SIM_MIN_DAYS, SIM_MIN_TRADES
+
+    base = {"needed_days": SIM_MIN_DAYS, "needed_trades": SIM_MIN_TRADES, "sessions": sessions}
     with _ch() as ch:
         try:
-            days = ch.query_df("SELECT count() AS n FROM ev.equity_daily")["n"][0]
-            trades = ch.query_df("SELECT count() AS n FROM ev.outcomes")["n"][0]
+            r = _latest_backtest_run(ch, "FROZEN_CONTROL", sessions)
         except Exception:  # noqa: BLE001
-            days, trades = 0, 0
-    enough = days >= 750 and trades >= 200
+            r = None
+    if r is None:
+        return {**base, "status": "INSUFFICIENT", "n_days": 0, "n_trades": 0,
+                "p_lo": None, "p_hi": None, "block_len": None, "histogram": [],
+                "note": (f"no backtest is stored for the {sessions}-session window yet; the simulation "
+                         "bootstraps a stored backtest's realised daily returns." if sessions else
+                         "no backtest has been run yet; the simulation bootstraps the backtest's realised "
+                         "daily returns.")}
+    span = f"backtest {r['start_d']} .. {r['end_d']} ({r['sessions']}-session window)"
+    n_days, n_trades = int(r["n_sessions"]), int(r["n_trades"])
+    if r["sim_status"] != "OK":
+        return {**base, "status": "INSUFFICIENT", "n_days": n_days, "n_trades": n_trades,
+                "p_lo": None, "p_hi": None, "block_len": None, "histogram": [],
+                "note": (f"forward Monte Carlo needs {SIM_MIN_DAYS} sessions and {SIM_MIN_TRADES} closed "
+                         f"trades of backtest; this {span} has {n_days} and {n_trades}. A distribution "
+                         f"fitted to less is a picture of noise. Select or run the 750- or 1250-session window.")}
     return {
-        "status": "OK" if enough else "INSUFFICIENT",
-        "n_days": int(days), "n_trades": int(trades),
-        "needed_days": 750, "needed_trades": 200,
-        "p_lo": None, "p_hi": None, "block_len": None,
-        "histogram": [],
-        "note": (f"forward Monte Carlo needs 750 engine-days and 200 closed trades; "
-                 f"have {days} and {trades}. A distribution fitted to this little "
-                 f"history would be a picture of noise."),
+        **base, "status": "OK", "n_days": n_days, "n_trades": n_trades,
+        "p_lo": r["sim_p_lo"], "p_hi": r["sim_p_hi"], "p_loss": r["sim_p_loss"],
+        "block_len": r["sim_block_len"], "horizon": r["sim_horizon"], "n_paths": r["sim_n_paths"],
+        "histogram": [{"bucket": b, "count": c} for b, c in zip(r["sim_hist_lo"], r["sim_hist_count"], strict=True)],
+        "note": (f"{r['sim_n_paths']:,} block-bootstrap paths of {r['sim_horizon']} sessions from the {span} "
+                 f"realised daily returns (FROZEN_CONTROL rules). Interval is the 5th-95th percentile of "
+                 f"one-year return; {r['sim_p_loss']:.0%} of paths lose money. It assumes the future "
+                 f"resembles that history -- it is not a forecast."),
     }
 
 

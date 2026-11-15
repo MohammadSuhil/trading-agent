@@ -140,6 +140,35 @@ Also: **ClickHouse holds port 9000 briefly after SIGTERM.** Restarting too fast 
 "Address already in use" and the new process exits silently. `services.sh down` now waits
 for the port to actually free.
 
+### Three more, hit 2026-11-11
+
+5. **Schema files never migrate an existing table.** Every statement is
+   `CREATE TABLE IF NOT EXISTS`, so re-applying a file adds **new tables** but silently
+   skips **new columns** on a table that already exists. A new column needs a hand-written
+   `ALTER TABLE … ADD COLUMN`. Also: `./infra/apply_schema.sh` with no argument applies
+   `schema.sql` only — pass `infra/clickhouse/schema_v2.sql` explicitly. To audit drift,
+   build both files into scratch databases (rename `md.`→`zz_md.` etc.) and diff
+   `system.columns` against the live DBs; this was clean on 2026-11-11.
+6. **The installed launchd plists can drift from `infra/launchd/`.** The installed
+   ClickHouse agent had `WorkingDirectory=…/infra/clickhouse`, so the config's relative
+   `infra/clickhouse/users.xml` did not resolve and the agent crash-looped every 10 s
+   (exit 76) — ClickHouse was simply "down" and the API returned 503s. It also created a
+   stray empty data dir at `infra/clickhouse/data/` (real data: `data/clickhouse/data/`).
+   Fix: `./infra/install_launchd.sh install`. If anything was started by hand with
+   `services.sh up`, stop it first or the agents cannot bind their ports.
+7. **The legacy bhavcopy changed its date format mid-file-series.** Pre-July-2024 files
+   (`cm{DD}{MON}{YYYY}bhav.csv.zip`) write `01-JUN-2023` but switched to `13-Jul-20` on
+   2020-07-13; `%Y` parsed "20" as year 20 AD and the insert crashed a backfill halfway.
+   The parser now handles both, and `NSEArchiveSource` rejects any file whose rows are not
+   all dated the session requested.
+8. **`launchctl kickstart -k` orphaned the API server.** The API plist launched
+   `uv run … python -m ta_api.serve`; launchd's signal reached only `uv`, and the python
+   server survived with PPID 1 — off the port, but still finishing an in-flight request on
+   *stale code*. One such orphan overwrote the control backtest curve 40 minutes after the
+   "restart". Fixed in `infra/launchd/com.tradingagent.api.plist` (exec the venv python
+   directly) — **needs `./infra/install_launchd.sh install` to take effect**. Until then,
+   after any restart check `pgrep -fl ta_api.serve`: exactly one python process should exist.
+
 ## Diagnostic that cracked it
 
 When ClickHouse hangs with no useful log, sample the process — it showed the main thread in

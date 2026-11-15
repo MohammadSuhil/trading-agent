@@ -6,12 +6,13 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/uv</string>
-    <string>run</string>
-    <string>--frozen</string>
-    <string>--directory</string>
-    <string>/Users/msuhi00/Projects/trading-agent</string>
-    <string>python</string>
+    <!-- The venv's python DIRECTLY, not `uv run`: launchd signals (stop,
+         kickstart -k) reach only the process it spawned. Under `uv run` that
+         was uv, and the python server underneath survived as an orphan --
+         found 2026-11-11 still serving an in-flight backtest on stale code and
+         overwriting the control curve. With --frozen, uv did no syncing here
+         anyway. Re-run `uv sync --frozen` yourself after changing deps. -->
+    <string>/Users/msuhi00/Projects/trading-agent/.venv/bin/python</string>
     <string>-m</string>
     <string>ta_api.serve</string>
     <!-- serve.py binds 127.0.0.1 AND ::1. Browsers resolve `localhost` to

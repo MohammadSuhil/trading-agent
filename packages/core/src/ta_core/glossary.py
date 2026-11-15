@@ -543,6 +543,22 @@ _TERMS: tuple[Term, ...] = (
        "Total Return Index: tracks the Nifty benchmark assuming all company dividends are reinvested.",
        "Comparing against a price-only index is unfair because real stockholders receive dividends. The system measures itself against the tougher total-return yardstick.",
        "audit"),
+    _t("NIFTY500_PRICE", "Nifty 500 index, dividends excluded",
+       "The published Nifty 500 index level, rescaled so it starts at the same rupee value as the backtest. It is the price index, not the total-return one, because the free daily archive file does not publish a total-return series.",
+       "Answers 'did the strategy beat simply holding the market?'. Because dividends (about 1.2% a year) are left out, this line is slightly too easy to beat -- treat a small win over it as a tie.",
+       "audit"),
+    _t("REGIME_FILTER", "Live rules: v2 Sortino-Momentum challenger",
+       "Cross-sectional Sortino risk-adjusted momentum strategy scoring on 12-month momentum, 126-day return, and distance to 52-week high, normalized by 252-day downside semideviation. Holds winners above SMA200 and reranked monthly in top 25. Protected daily by 12.5% initial stop, 18% trailing stop after +8% gain, and correlation gates. Backtested on the survivorship-free point-in-time Top-350 liquid NSE universe across 36 trials (five start dates, six windows, all delivery costs included).",
+       "Won the pre-registered contest against the frozen rules over 2021-2025 out-of-sample data: +135% vs Nifty 500 +106% with Sharpe 1.05 and drawdown 24%, beating across all five shifted start dates. Also wins in sample 2025-2026 (+46.33% vs +1.97%, Sharpe 1.61).",
+       "audit"),
+    _t("REG-01", "Entry block: no new buys in weak markets",
+       "A rule that stops all new purchases while the Nifty 500 index is in a bear or sideways market. Positions already held keep their stops, targets and exits.",
+       "Switched on for the live paper account on 2026-11-12 after it beat the frozen rules in a pre-registered test. The frozen rules never use it, so the effect stays measurable.",
+       "risk"),
+    _t("INDEX_REGIME", "Market state from the Nifty 500 index",
+       "Bull, bear, high-volatility or sideways, decided each evening from the Nifty 500's 50- and 200-day averages and its recent volatility. A calmer state is only accepted after it has held for three sessions.",
+       "The breadth-based market state still sets position and risk limits. This index state decides one thing: while it is bear or sideways, the live rules make no new buys.",
+       "regime"),
 )
 
 GLOSSARY: dict[str, Term] = {t.term: t for t in _TERMS}

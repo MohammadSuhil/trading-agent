@@ -202,6 +202,7 @@ export function PortfolioView({
 }) {
   const pf = useApi<Portfolio>('/api/portfolio', version);
   const p = pf.data;
+  const hasBenchmark = (p?.benchmark_curve?.length ?? 0) >= 2;
   const positions = p?.positions ?? [];
   const drawdown = p?.drawdown_pct;
 
@@ -307,14 +308,24 @@ export function PortfolioView({
           </div>
         </div>
 
+        {/* Only claim a benchmark when one is actually plotted. The benchmark is
+            the Nifty 500 PRICE index (ADR-0005) -- the free archive has no
+            total-return series, so the label must not say TRI. */}
         <Panel
-          title="Equity curve vs. benchmark"
-          subtitle="Paper account value alongside the Nifty Total Return Index"
-          right={<TermLabel code="TRI">Benchmark: TRI</TermLabel>}
+          title={hasBenchmark ? 'Equity curve vs. Nifty 500' : 'Equity curve'}
+          subtitle={
+            hasBenchmark
+              ? 'Paper account value alongside the Nifty 500 index (price, dividends excluded), rebased to the same start'
+              : 'Paper account value (the Nifty 500 line appears from the second recorded session)'
+          }
+          right={
+            hasBenchmark ? <TermLabel code="NIFTY500_PRICE">Benchmark: Nifty 500</TermLabel> : undefined
+          }
         >
           <EquityCurve
             equityCurve={p?.equity_curve ?? []}
             benchmarkCurve={p?.benchmark_curve ?? []}
+            labels={{ primary: 'Paper account', benchmark: 'Nifty 500 index (price, rebased)' }}
             mode={mode ?? 'light'}
           />
         </Panel>

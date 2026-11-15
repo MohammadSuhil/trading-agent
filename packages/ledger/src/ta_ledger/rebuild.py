@@ -149,6 +149,8 @@ def rebuild_from_ledger(
             last=lot.last_price,
             stop=lot.stop,
             opened=lot.entry_date,
+            target=lot.target,
+            horizon=lot.horizon.value,
         )
         for lot in open_lots.values()
     )
